@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 import secrets
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
+from automatic_testing import evaluate_probe
+from codex_routes import codex_blueprint
 from enrollment import bank_summary, enroll_automatic, request_completion, test_automatic
-from fingerprint import analyze_global_outputs, generate_challenges, load_bank, parse_numbers
+from fingerprint import analyze_global_outputs, generate_challenges, load_bank
 from bank_builder import build_bank, read_rows
 
 
 app = Flask(__name__)
+app.register_blueprint(codex_blueprint)
 PROJECT = Path(__file__).resolve().parent
 CUSTOM_BANKS_FILE = PROJECT / "data" / "custom_banks.json"
 UNIFIED_BANK_FILE = PROJECT / "data" / "unified_bank.json"
@@ -213,17 +215,7 @@ def automatic_test_probe():
             temperature=requested_temperature(payload),
             api_format="auto",
         )
-        expected_count = int(payload["expected_count"])
-        parsed_numbers = len(parse_numbers(text))
-        minimum_numbers = max(80, math.ceil(expected_count * 0.55))
-        return jsonify(
-            {
-                "text": text,
-                "parsed_numbers": parsed_numbers,
-                "minimum_numbers": minimum_numbers,
-                "accepted": parsed_numbers >= minimum_numbers,
-            }
-        )
+        return jsonify(evaluate_probe(text, int(payload["expected_count"])))
     except Exception as error:
         return jsonify({"error": str(error)}), 502
 

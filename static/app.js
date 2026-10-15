@@ -1,3 +1,9 @@
+import {
+  collectAutomaticOutputs,
+  readCodexPreferences,
+  writeCodexPreferences,
+} from "./automatic-test-core.mjs";
+
 const state = {
   challenges: [],
   bankId: window.DEFAULT_BANK_ID,
@@ -6,6 +12,10 @@ const state = {
 };
 
 const byId = (id) => document.getElementById(id);
+let codexInitialized = false;
+let codexManualPath = false;
+let codexStatusBusy = false;
+let automaticTesting = false;
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (character) => ({
@@ -38,6 +48,7 @@ function activateMode(group, name) {
   document.querySelectorAll(`#workspace-${group === "test" ? "test" : "library"} .mode-panel`).forEach((item) => {
     item.classList.toggle("active", item.id === `${group}-${name}` || item.id === `library-${name}`);
   });
+  if (group === "test" && name === "codex" && !codexInitialized) initializeCodex();
 }
 
 async function loadChallenges() {
@@ -84,8 +95,13 @@ function renderResult(payload) {
       <td>${percent(item.profile_similarity)}</td>
     </tr>
   `).join("");
-  const apiNote = payload.api_test
-    ? `<span>API 获得 ${payload.api_test.received}/${payload.api_test.requested} 份有效回答，实际尝试 ${payload.api_test.attempted}/${payload.api_test.max_attempts}${payload.api_test.errors.length ? `，${payload.api_test.errors.length} 次未采用` : ""}</span>`
+  const automatic = payload.automatic_test || (payload.api_test && { transport: "API", ...payload.api_test });
+  const automaticErrors = automatic ? normalizeAutomaticErrors(automatic.errors) : [];
+  const failureDetails = automaticErrors
+    .map((error) => `挑战 ${escapeHtml(error.attempt)}：${escapeHtml(error.message)}`)
+    .join("；");
+  const automaticNote = automatic
+    ? `<span>${escapeHtml(automatic.transport)} 获得 ${automatic.received}/${automatic.requested} 份有效回答，实际尝试 ${automatic.attempted}/${automatic.max_attempts}${automaticErrors.length ? `，${automaticErrors.length} 次未采用` : ""}${failureDetails ? `。失败摘要：${failureDetails}` : ""}</span>`
     : "";
   byId("result").innerHTML = `
     <div class="result-summary">
@@ -96,7 +112,7 @@ function renderResult(payload) {
     </div>
     <div class="diagnostics">${diagnostics}</div>
     <div class="table-wrap"><table><thead><tr><th>排序</th><th>候选模型</th><th>家族</th><th>归因概率</th><th>分布相似度</th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${apiNote ? `<div class="result-note">${apiNote}</div>` : ""}
+    ${automaticNote ? `<div class="result-note">${automaticNote}</div>` : ""}
     <div class="result-guidance" role="note" aria-label="结果说明">
       <p>本工具仅对指纹库内的模型进行归因；若待测模型不在指纹库中，得到任何结果都有可能。</p>
       <p>Claude Code 的系统提示词会影响模型偏好，测试结果存在较大偏差，建议不要在 Claude Code 中测试。</p>
@@ -126,99 +142,144 @@ async function analyzeManual() {
   button.disabled = false;
 }
 
-function renderApiProgress(states, status) {
+function normalizeAutomaticErrors(errors) {
+  return Array.isArray(errors) ? errors.map((error, index) => (
+    error && typeof error === "object"
+      ? { attempt: error.attempt, message: error.message }
+      : { attempt: index + 1, message: String(error) }
+  )) : [];
+}
+
+function failureSummaryText(errors) {
+  return normalizeAutomaticErrors(errors)
+    .map((error) => `挑战 ${error.attempt}：${error.message}`)
+    .join("；");
+}
+
+function renderAutomaticProgress(ids, states, errors, status) {
   const valid = states.filter((state) => state === "done").length;
   const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
   const target = 3;
-  byId("api-test-progress").hidden = false;
-  byId("api-progress-status").textContent = status;
-  byId("api-progress-count").textContent = `有效 ${valid}/${target} · 已尝试 ${attempted}/${states.length}`;
-  byId("api-progress-fill").style.width = `${(valid / target) * 100}%`;
-  byId("api-progress-steps").innerHTML = states.map((state, index) => {
-    const labels = { pending: "等待", working: "请求中", done: "有效", invalid: "数字不足", error: "接口失败", skipped: "无需调用" };
-    return `<span class="progress-step ${state}"><b>${index + 1}</b>挑战 ${index + 1} · ${labels[state]}</span>`;
+  const errorsByAttempt = new Map(
+    normalizeAutomaticErrors(errors).map((error) => [Number(error.attempt), error.message]),
+  );
+  byId(ids.panel).hidden = false;
+  byId(ids.status).textContent = status;
+  byId(ids.count).textContent = `有效 ${valid}/${target} · 已尝试 ${attempted}/${states.length}`;
+  byId(ids.fill).style.width = `${(valid / target) * 100}%`;
+  byId(ids.steps).innerHTML = states.map((state, index) => {
+    const labels = { pending: "等待", working: "请求中", done: "有效", invalid: "数字不足", error: "请求失败", skipped: "无需调用" };
+    const failure = errorsByAttempt.get(index + 1);
+    return `<span class="progress-step ${state}"><b>${index + 1}</b>挑战 ${index + 1} · ${labels[state]}${failure ? ` · ${escapeHtml(failure)}` : ""}</span>`;
   }).join("");
 }
 
-async function testViaApi(event) {
+async function requestJson(url, payload) {
+  const response = await fetch(url, payload === undefined ? undefined : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "请求失败");
+  return result;
+}
+
+function saveCodexPreferences() {
+  try {
+    writeCodexPreferences(window.localStorage, {
+      manualPath: codexManualPath ? byId("codex-path").value.trim() : "",
+      model: byId("codex-model").value.trim(),
+      reasoningEffort: byId("codex-reasoning-effort").value,
+    });
+  } catch {
+    // The test remains usable when browser storage is unavailable.
+  }
+}
+
+function updateAutomaticControls() {
+  document.querySelectorAll("#api-test-form button[type=submit], #codex-test-form input, #codex-test-form select, #codex-test-form button")
+    .forEach((element) => { element.disabled = automaticTesting || (codexStatusBusy && element.closest("#codex-test-form")); });
+}
+
+async function detectCodex(path, manual) {
+  if (codexStatusBusy) return false;
+  codexStatusBusy = true;
+  updateAutomaticControls();
+  setMessage(byId("codex-runtime-status"), "正在检查 Codex 路径、版本和登录状态……", "working");
+  try {
+    const status = await requestJson("/api/codex/status", { codex_path: path });
+    const sources = { desktop: "桌面版", install: "安装目录", environment: "环境变量", path: "PATH", manual: "手动路径" };
+    if (status.available) {
+      byId("codex-path").value = status.path;
+      codexManualPath = manual;
+    }
+    const details = status.available
+      ? `来源：${sources[status.source] || status.source} · 版本：${status.version} · 登录：${status.authenticated ? "已登录" : "未登录"}`
+      : "";
+    if (!status.available || !status.authenticated) {
+      setMessage(byId("codex-runtime-status"), `${details}${details ? "。" : ""}${status.error || "Codex 不可用"}。请检查完整 codex.exe 路径，或点击自动检测；未登录时请先在 Codex 中登录。`, "error");
+      return false;
+    }
+    setMessage(byId("codex-runtime-status"), details, "success");
+    saveCodexPreferences();
+    return true;
+  } catch (error) {
+    setMessage(byId("codex-runtime-status"), `无法检查 Codex：${error.message}。请重试自动检测或检查路径。`, "error");
+    return false;
+  } finally {
+    codexStatusBusy = false;
+    updateAutomaticControls();
+  }
+}
+
+function initializeCodex() {
+  codexInitialized = true;
+  let preferences;
+  try {
+    preferences = readCodexPreferences(window.localStorage);
+  } catch {
+    preferences = readCodexPreferences(null);
+  }
+  byId("codex-path").value = preferences.manualPath;
+  byId("codex-model").value = preferences.model;
+  byId("codex-reasoning-effort").value = preferences.reasoningEffort;
+  codexManualPath = Boolean(preferences.manualPath);
+  return detectCodex(preferences.manualPath, codexManualPath);
+}
+
+async function testAutomatically(event, options) {
   event.preventDefault();
-  const button = event.currentTarget.querySelector("button[type=submit]");
-  button.disabled = true;
+  if (automaticTesting || (options.beforeRun && codexStatusBusy)) return;
+  automaticTesting = true;
+  updateAutomaticControls();
   byId("result").hidden = true;
   setMessage(byId("test-message"), "");
-
-  const challengeResponse = await fetch("/api/challenges");
-  const firstBatch = (await challengeResponse.json()).challenges;
-  const retryResponse = await fetch("/api/challenges");
-  const challenges = firstBatch.concat((await retryResponse.json()).challenges);
-  const states = challenges.map(() => "pending");
-  const outputs = [];
-  const errors = [];
-  const target = 3;
-  const configuration = {
-    base_url: byId("test-api-base").value,
-    api_key: byId("test-api-key").value,
-    api_model: byId("test-api-model").value,
-    temperature: optionalNumber("test-temperature"),
-  };
-  renderApiProgress(states, "已生成独立挑战，准备调用模型");
-
-  for (let index = 0; index < challenges.length && outputs.length < target; index += 1) {
-    states[index] = "working";
-    renderApiProgress(states, `正在进行第 ${index + 1} 次尝试，等待模型完整输出……`);
-    try {
-      const response = await fetch("/api/test/probe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...configuration,
-          prompt: challenges[index].prompt,
-          expected_count: challenges[index].expected_count,
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "接口请求失败");
-      if (payload.accepted) {
-        outputs.push({ text: payload.text, expected_count: challenges[index].expected_count });
-        states[index] = "done";
-      } else {
-        errors.push(`尝试 ${index + 1}: 有效数字 ${payload.parsed_numbers}/${payload.minimum_numbers}`);
-        states[index] = "invalid";
-      }
-    } catch (error) {
-      errors.push(`尝试 ${index + 1}: ${error.message}`);
-      states[index] = "error";
+  try {
+    if (options.beforeRun && !await options.beforeRun()) return;
+    const firstBatch = (await requestJson("/api/challenges")).challenges;
+    const challenges = firstBatch.concat((await requestJson("/api/challenges")).challenges);
+    const { outputs, errors, states, attempted } = await collectAutomaticOutputs({
+      challenges,
+      configuration: options.configuration(),
+      target: 3,
+      probe: (payload) => requestJson(options.endpoint, payload),
+      onProgress: ({ states, errors, status }) => renderAutomaticProgress(options.progressIds, states, errors, status),
+    });
+    if (!outputs.length) {
+      setMessage(byId("test-message"), `没有获得可分析输出。${errors.length} 次未采用。${failureSummaryText(errors)}`, "error");
+      return;
     }
-    renderApiProgress(states, `当前已有 ${outputs.length}/${target} 份有效回答`);
-  }
-
-  if (outputs.length === target) {
-    states.forEach((state, index) => { if (state === "pending") states[index] = "skipped"; });
-  }
-
-  if (!outputs.length) {
-    renderApiProgress(states, "六次尝试后仍没有可用回答");
-    setMessage(byId("test-message"), `没有获得可分析输出。${errors[0] || ""}`, "error");
-    button.disabled = false;
-    return;
-  }
-
-  renderApiProgress(states, "模型回答已收齐，正在计算归因概率……");
-  const analysisResponse = await fetch("/api/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ outputs }),
-  });
-  const result = await analysisResponse.json();
-  if (analysisResponse.ok) {
-    const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
-    result.api_test = { requested: target, attempted, max_attempts: challenges.length, received: outputs.length, errors };
-    renderApiProgress(states, `测试完成：${outputs.length}/${target} 份有效回答进入归因`);
+    if (options.onSuccess) options.onSuccess();
+    renderAutomaticProgress(options.progressIds, states, errors, "模型回答已收齐，正在计算归因概率……");
+    const result = await requestJson("/api/analyze", { outputs });
+    result.automatic_test = { transport: options.transport, requested: 3, attempted, max_attempts: challenges.length, received: outputs.length, errors };
+    renderAutomaticProgress(options.progressIds, states, errors, `测试完成：${outputs.length}/3 份有效回答进入归因`);
     renderResult(result);
-  } else {
-    setMessage(byId("test-message"), result.error || "API 自动测试失败。", "error");
+  } catch (error) {
+    setMessage(byId("test-message"), `${options.transport} 自动测试失败：${error.message}`, "error");
+  } finally {
+    automaticTesting = false;
+    updateAutomaticControls();
   }
-  button.disabled = false;
 }
 
 function updateUnifiedSummary(summary) {
@@ -329,7 +390,37 @@ document.querySelectorAll("[data-test-mode]").forEach((button) => button.addEven
 byId("bank-select").addEventListener("change", (event) => selectBank(event.target.value));
 byId("regenerate").addEventListener("click", loadChallenges);
 byId("analyze").addEventListener("click", analyzeManual);
-byId("api-test-form").addEventListener("submit", testViaApi);
+const progressIds = (prefix) => ({
+  panel: `${prefix}-test-progress`, status: `${prefix}-progress-status`,
+  count: `${prefix}-progress-count`, fill: `${prefix}-progress-fill`, steps: `${prefix}-progress-steps`,
+});
+byId("api-test-form").addEventListener("submit", (event) => testAutomatically(event, {
+  endpoint: "/api/test/probe", transport: "API", progressIds: progressIds("api"),
+  configuration: () => ({
+    base_url: byId("test-api-base").value, api_key: byId("test-api-key").value,
+    api_model: byId("test-api-model").value, temperature: optionalNumber("test-temperature"),
+  }),
+}));
+byId("codex-test-form").addEventListener("submit", (event) => testAutomatically(event, {
+  endpoint: "/api/test/codex/probe", transport: "Codex CLI", progressIds: progressIds("codex"),
+  beforeRun: () => detectCodex(codexManualPath ? byId("codex-path").value.trim() : "", codexManualPath),
+  configuration: () => ({
+    codex_path: byId("codex-path").value.trim(), model: byId("codex-model").value.trim(),
+    reasoning_effort: byId("codex-reasoning-effort").value,
+  }),
+  onSuccess: saveCodexPreferences,
+}));
+byId("codex-detect").addEventListener("click", () => {
+  codexManualPath = false;
+  saveCodexPreferences();
+  return detectCodex("", false);
+});
+byId("codex-path").addEventListener("input", () => { codexManualPath = Boolean(byId("codex-path").value.trim()); });
+byId("codex-path").addEventListener("blur", (event) => {
+  // Let the clicked button run its own discovery/preflight before disabling it.
+  if (event.relatedTarget?.closest("#codex-test-form button")) return;
+  if (!automaticTesting && codexManualPath) detectCodex(byId("codex-path").value.trim(), true);
+});
 byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });
 byId("create-bank-form").addEventListener("submit", createBank);

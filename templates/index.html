@@ -33,6 +33,7 @@
         <div class="mode-tabs" role="tablist" aria-label="测试方式">
           <button class="mode-tab active" data-test-mode="manual" type="button">手动测试</button>
           <button class="mode-tab" data-test-mode="api" type="button">API 自动测试</button>
+          <button class="mode-tab" data-test-mode="codex" type="button">Codex 自动测试</button>
         </div>
 
         <section id="test-manual" class="mode-panel active">
@@ -55,6 +56,24 @@
             <div class="progress-heading"><strong id="api-progress-status">准备测试</strong><span id="api-progress-count">有效 0/3 · 已尝试 0/6</span></div>
             <div class="progress-track"><i id="api-progress-fill"></i></div>
             <div id="api-progress-steps" class="progress-steps"></div>
+          </section>
+        </section>
+
+        <section id="test-codex" class="mode-panel">
+          <form id="codex-test-form" class="form-panel">
+            <div class="form-heading"><strong>使用本机 Codex 登录</strong><span>仅支持 Windows · 最多六次独立挑战，收集三份有效回答</span></div>
+            <div class="form-grid two">
+              <label class="codex-path-field"><span>Codex 可执行文件路径（可选）</span><div class="codex-path-row"><input id="codex-path" type="text" placeholder="自动检测桌面版 codex.exe，也可输入完整路径" autocomplete="off"><button id="codex-detect" class="button secondary" type="button">自动检测</button></div><small>检测后显示完整路径；手动修改后会检查该路径。</small></label>
+              <div id="codex-runtime-status" class="message" hidden role="status" aria-live="polite"></div>
+              <label><span>模型</span><input id="codex-model" value="gpt-6-astra" required></label>
+              <label><span>推理强度</span><select id="codex-reasoning-effort"><option value="low" selected>low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
+            </div>
+            <div class="form-footer"><button class="button primary" type="submit">开始测试</button></div>
+          </form>
+          <section id="codex-test-progress" class="progress-panel" hidden aria-live="polite">
+            <div class="progress-heading"><strong id="codex-progress-status">准备测试</strong><span id="codex-progress-count">有效 0/3 · 已尝试 0/6</span></div>
+            <div class="progress-track"><i id="codex-progress-fill"></i></div>
+            <div id="codex-progress-steps" class="progress-steps"></div>
           </section>
         </section>
 
@@ -101,6 +120,6 @@
 
   <datalist id="model-options">{% for model in bank.models %}<option value="{{ model.id }}">{% endfor %}</datalist>
   <script>window.BANK_SUMMARIES = {{ banks | tojson }}; window.UNIFIED_SUMMARY = {{ unified | tojson }}; window.DEFAULT_BANK_ID = {{ default_bank_id | tojson }};</script>
-  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

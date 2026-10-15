@@ -19,9 +19,11 @@ python start.py
 
 - **手动测试**：复制三条挑战，分别发送给同一个待测模型，再粘贴每次完整输出。
 - **API 自动测试**：填写 Base URL、API Key 和模型名。程序会自动尝试 OpenAI Chat Completions 与 Anthropic Messages 格式，以三份有效回答为目标完成归因。
+- **Codex 自动测试**：仅支持 Windows。打开该页签会自动发现桌面版自带的 Codex CLI，并显示完整 `codex.exe` 路径、来源、版本和登录状态；也可手动填写路径。使用当前 Codex 登录，默认模型为 `gpt-6-astra`，推理强度为 `low`。点击“自动检测”会重新发现桌面版 CLI，忽略当前输入路径。
 - **指纹库管理**：可以新建指纹库，或通过 API 为现有指纹库添加模型指纹。
 
 API Key 只用于当前页面发起请求，不写入磁盘。
+API 和 Codex 自动测试均按顺序执行最多六条独立挑战，获得三份有效回答后停止；至少一份有效回答即可计算归因。Codex 模型、推理强度和成功使用的手动路径保存在本机浏览器；自动发现的路径不会作为手动路径保存，以便桌面版升级后重新发现。登录信息不保存在网页中。
 自动采集会在对应的 `*_reference.jsonl` 中保存实际 user prompt、base prompt、system prompt 和 user prefix；拟合后的 `*_bank.json` 与 `unified_bank.json` 只保存统计指纹和校准参数。
 
 ## 指纹方法
@@ -60,6 +62,9 @@ fingerprint.py      指纹提取与归因
 bank_builder.py     指纹库构建与概率校准
 challenge_suite.py  自动建库挑战
 enrollment.py       API 调用与指纹采集
+codex_runner.py     Windows Codex CLI 发现、登录检查与隔离执行
+codex_routes.py     Codex 状态与单次挑战接口
+automatic_testing.py  API 与 Codex 共用的回答有效性判定
 rebuild_unified_bank.py  重建统一全局库
 data/               参考数据与指纹库
 static/             页面资源
