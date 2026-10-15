@@ -186,6 +186,18 @@ tbody tr.winner { background: var(--primary-soft); }
 .status-tag { display: inline-block; padding: 4px 7px; border-radius: 5px; font-size: 10px; }
 .status-tag.ok { color: var(--success); background: var(--success-soft); }
 .status-tag.warning { color: var(--warning); background: var(--warning-soft); }
+.status-tag.error { color: var(--danger); background: var(--danger-soft); }
+.candy-question { margin-bottom: 14px; overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+.candy-question summary { padding: 13px 16px; cursor: pointer; font-weight: 650; }
+.candy-question pre { margin: 0; padding: 15px 17px; overflow-x: auto; color: var(--text); background: var(--surface-soft); border-top: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
+.candy-progress-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.candy-result-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 17px; border-bottom: 1px solid var(--line); }
+.candy-result-header span { color: var(--muted); }
+.candy-batch-question { margin: 12px 16px; }
+.candy-summary { padding: 12px 17px; color: var(--text); background: var(--surface-soft); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); line-height: 1.7; }
+.candy-answer-disclosure { min-width: 110px; }
+.candy-answer-disclosure summary { color: var(--primary); cursor: pointer; font-weight: 650; }
+.candy-answer-disclosure pre { max-width: 440px; max-height: 260px; margin: 8px 0 0; padding: 10px; overflow: auto; color: var(--text); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
 .scope-panel { margin-top: 16px; padding: 14px 16px; }
 .scope-panel p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
 
@@ -204,7 +216,7 @@ tbody tr.winner { background: var(--primary-soft); }
   .topbar-status span:not(.status-dot):not(:last-child), .topbar-status .divider { display: none; }
   .layout { display: block; }
   .sidebar { position: static; width: 100%; height: auto; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
-  .sidebar nav { grid-template-columns: 1fr 1fr; }
+  .sidebar nav { grid-template-columns: repeat(3, 1fr); }
   .nav-button { justify-content: flex-start; }
   .nav-button > span:last-child { display: flex; }
   .main-content { padding: 20px 12px 40px; }
@@ -215,6 +227,7 @@ tbody tr.winner { background: var(--primary-soft); }
   .mode-tab { min-width: 0; flex: 1; }
   .codex-path-row { flex-direction: column; }
   .progress-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .candy-result-header { align-items: flex-start; flex-direction: column; }
   .inventory-summary { grid-template-columns: 1fr 1fr; }
   .inventory-summary > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
   .inventory-summary > div:nth-child(4) { border-top: 1px solid var(--line); }

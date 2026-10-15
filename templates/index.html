@@ -22,7 +22,8 @@
     <aside class="sidebar">
       <nav aria-label="工作区">
         <button class="nav-button active" data-workspace="test" type="button"><span class="nav-icon">01</span><span><strong>模型测试</strong></span></button>
-        <button class="nav-button" data-workspace="library" type="button"><span class="nav-icon">02</span><span><strong>指纹库管理</strong></span></button>
+        <button class="nav-button" data-workspace="candy" type="button"><span class="nav-icon">02</span><span><strong>糖果测试</strong></span></button>
+        <button class="nav-button" data-workspace="library" type="button"><span class="nav-icon">03</span><span><strong>指纹库管理</strong></span></button>
       </nav>
     </aside>
 
@@ -80,6 +81,68 @@
 
         <div id="test-message" class="message" hidden></div>
         <section id="result" class="result-panel" hidden aria-live="polite"></section>
+      </section>
+
+      <section id="workspace-candy" class="workspace">
+        <div class="page-header"><h1>糖果测试</h1></div>
+
+        <details id="candy-question-disclosure" class="candy-question">
+          <summary>查看测试题目</summary>
+          <pre id="candy-question-prompt">正在加载题目……</pre>
+        </details>
+
+        <div class="mode-tabs" role="tablist" aria-label="糖果测试方式">
+          <button class="mode-tab active" data-candy-mode="api" type="button">API 自动测试</button>
+          <button class="mode-tab" data-candy-mode="codex" type="button">Codex 自动测试</button>
+        </div>
+
+        <section id="candy-api" class="mode-panel active">
+          <form id="candy-api-form" class="form-panel">
+            <div class="form-grid two">
+              <label><span>Base URL</span><input id="candy-api-base" type="url" required placeholder="https://example.com/v1"></label>
+              <label><span>模型</span><input id="candy-api-model" required placeholder="模型名"></label>
+              <label><span>API Key</span><input id="candy-api-key" type="password" required autocomplete="off"></label>
+              <label><span>接口格式</span><select id="candy-api-format"><option value="openai" selected>OpenAI Chat Completions</option><option value="anthropic">Anthropic Messages</option></select></label>
+              <label><span>测试轮数</span><input id="candy-api-rounds" type="number" min="1" max="50" value="5" required></label>
+              <label><span>请求超时（秒）</span><input id="candy-api-timeout" type="number" min="30" max="1800" value="600" required></label>
+              <label><span>温度（可选）</span><input id="candy-api-temperature" type="number" min="0" max="2" step="0.1" placeholder="接口默认"></label>
+            </div>
+            <div class="form-footer"><button id="candy-api-start" class="button primary" type="submit">开始测试</button></div>
+          </form>
+        </section>
+
+        <section id="candy-codex" class="mode-panel">
+          <form id="candy-codex-form" class="form-panel">
+            <div class="form-grid two">
+              <label class="codex-path-field"><span>Codex 可执行文件路径（可选）</span><div class="codex-path-row"><input id="candy-codex-path" type="text" placeholder="自动检测桌面版 codex.exe，也可输入完整路径" autocomplete="off"><button id="candy-codex-detect" class="button secondary" type="button">自动检测</button></div></label>
+              <div id="candy-codex-runtime-status" class="message" hidden role="status" aria-live="polite"></div>
+              <div class="codex-model-field"><label for="candy-codex-model">模型</label><div class="codex-model-row"><input id="candy-codex-model" value="gpt-6-astra" maxlength="128" pattern="[A-Za-z0-9._/:-]+" required autocomplete="off"><button id="candy-codex-model-toggle" class="codex-model-control codex-model-toggle" type="button" aria-label="展开模型列表" title="展开模型列表"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><button id="candy-codex-model-refresh" class="codex-model-control codex-model-refresh" type="button" aria-label="刷新模型列表" title="刷新模型列表"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg></button><div id="candy-codex-model-menu" class="codex-model-menu" role="listbox" hidden></div></div><span id="candy-codex-model-status" hidden aria-live="polite"></span></div>
+              <label><span>推理强度</span><select id="candy-codex-reasoning-effort"><option value="low" selected>low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
+              <label><span>测试轮数</span><input id="candy-codex-rounds" type="number" min="1" max="50" value="5" required></label>
+              <label><span>请求超时（秒）</span><input id="candy-codex-timeout" type="number" min="30" max="1800" value="600" required></label>
+              <label class="codex-config-toggle"><input id="candy-codex-use-user-config" type="checkbox"><span>读取 Codex 用户配置（兼容 Codex++）</span></label>
+            </div>
+            <div class="form-footer"><button id="candy-codex-start" class="button primary" type="submit">开始测试</button></div>
+          </form>
+        </section>
+
+        <div id="candy-message" class="message" hidden aria-live="polite"></div>
+        <section id="candy-progress-panel" class="progress-panel" hidden aria-live="polite">
+          <div class="progress-heading"><strong id="candy-progress-status">准备测试</strong><span id="candy-progress-count">已完成 0/0</span></div>
+          <div class="progress-track"><i id="candy-progress-fill"></i></div>
+          <div class="candy-progress-actions"><button id="candy-stop" class="button secondary" type="button" disabled>停止后续测试</button></div>
+        </section>
+
+        <section id="candy-results" class="result-panel" hidden aria-live="polite">
+          <div class="candy-result-header">
+            <strong id="candy-batch-title">测试结果</strong>
+            <span id="candy-batch-config"></span>
+          </div>
+          <details class="candy-question candy-batch-question"><summary>本次测试题目</summary><pre id="candy-batch-question"></pre></details>
+          <div id="candy-summary" class="candy-summary"></div>
+          <div class="table-wrap"><table><thead><tr><th>轮次</th><th>状态</th><th>最终答案</th><th>输入 tokens</th><th>输出 tokens</th><th>推理 tokens</th><th>耗时</th><th>端到端 TPS</th><th>判定原因</th><th>回答</th></tr></thead><tbody id="candy-result-rows"></tbody></table></div>
+        </section>
+        <template id="candy-answer-disclosure"><details class="candy-answer-disclosure"><summary>查看回答</summary><pre></pre></details></template>
       </section>
 
       <section id="workspace-library" class="workspace">

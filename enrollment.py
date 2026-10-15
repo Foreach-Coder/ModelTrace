@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+from completion_errors import CompletionFailureDetails, StructuredCompletionError
 from fingerprint import analyze_global_outputs, generate_challenges, parse_numbers
 from bank_builder import build_bank, read_rows
 from challenge_suite import fingerprint_suite
@@ -203,7 +204,7 @@ def _compact_upstream_error(details: str, fallback: str) -> str:
     return text[:500]
 
 
-def _request_completion(
+def _request_completion_payload(
     base_url: str,
     api_key: str,
     api_model: str,
@@ -211,7 +212,9 @@ def _request_completion(
     temperature: float | None,
     api_format: str,
     system_prompt: str = "",
-) -> str:
+    timeout: float = 240,
+    max_attempts: int = MAX_ATTEMPTS,
+) -> dict:
     if api_format == "anthropic":
         body_data = {
             "model": api_model,
@@ -247,27 +250,44 @@ def _request_completion(
     body = json.dumps(body_data).encode("utf-8")
     url = completion_url(base_url, api_format)
     payload = None
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=240) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             break
         except urllib.error.HTTPError as error:
             details = error.read().decode("utf-8", errors="replace").strip()
             message = _compact_upstream_error(details, error.reason)
+            if api_key:
+                message = message.replace(api_key, "[REDACTED]")
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
-            if attempt < MAX_ATTEMPTS and error.code in RETRYABLE_STATUS:
+            if attempt < max_attempts and error.code in RETRYABLE_STATUS:
                 time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
                 continue
             raise RuntimeError(f"HTTP {error.code}: {message}{retried}") from error
         except urllib.error.URLError as error:
             reason = getattr(error, "reason", str(error))
-            if attempt < MAX_ATTEMPTS:
+            if api_key:
+                reason = str(reason).replace(api_key, "[REDACTED]")
+            if attempt < max_attempts:
                 time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
                 continue
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
             raise RuntimeError(f"无法连接接口：{reason}{retried}") from error
+    return payload
+
+
+def _completion_text(payload: dict, api_format: str, strict: bool = False) -> str:
+    if strict:
+        try:
+            return _completion_text_checked(payload, api_format, strict=True)
+        except (KeyError, IndexError, TypeError, AttributeError) as error:
+            raise RuntimeError("上游接口未返回可用回答结构") from error
+    return _completion_text_checked(payload, api_format)
+
+
+def _completion_text_checked(payload: dict, api_format: str, strict: bool = False) -> str:
     if api_format == "anthropic":
         content = "".join(
             block.get("text", "")
@@ -281,12 +301,138 @@ def _request_completion(
             raise RuntimeError("回答因 max_tokens 截断，本次回答不计入")
     else:
         choice = payload["choices"][0]
+        if strict and choice["message"].get("refusal"):
+            raise RuntimeError("模型拒绝生成，本次回答不计入")
         content = choice["message"]["content"]
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content)
         if choice.get("finish_reason") in {"length", "content_filter"}:
             raise RuntimeError(f"回答未正常完成（{choice['finish_reason']}），本次回答不计入")
+    if strict and (not isinstance(content, str) or not content.strip()):
+        raise RuntimeError("上游接口未返回非空回答")
     return str(content)
+
+
+def _token_count(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _completion_usage(payload: dict, api_format: str) -> dict[str, int | None]:
+    usage = payload.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    if api_format == "anthropic":
+        input_tokens = _token_count(usage.get("input_tokens"))
+        if input_tokens is not None:
+            for field in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+                cached = _token_count(usage.get(field))
+                if cached is not None:
+                    input_tokens += cached
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": _token_count(usage.get("output_tokens")),
+            "reasoning_tokens": None,
+        }
+    details = usage.get("completion_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    return {
+        "input_tokens": _token_count(usage.get("prompt_tokens")),
+        "output_tokens": _token_count(usage.get("completion_tokens")),
+        "reasoning_tokens": _token_count(details.get("reasoning_tokens")),
+    }
+
+
+def _partial_completion_text(payload: object, api_format: str) -> str | None:
+    """Extract transport-provided text without treating completion state as success."""
+    if not isinstance(payload, dict):
+        return None
+    try:
+        if api_format == "anthropic":
+            blocks = payload.get("content")
+            if not isinstance(blocks, list):
+                return None
+            text = "".join(
+                value
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "text"
+                and isinstance((value := block.get("text")), str)
+            )
+        else:
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                return None
+            message = choices[0].get("message")
+            if not isinstance(message, dict):
+                return None
+            content = message.get("content")
+            if isinstance(content, list):
+                text = "".join(
+                    value
+                    for part in content
+                    if isinstance(part, dict) and isinstance((value := part.get("text")), str)
+                )
+            elif isinstance(content, str):
+                text = content
+            else:
+                return None
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+    return text if text.strip() else None
+
+
+def _available_usage(usage: dict[str, int | None]) -> dict[str, int | None] | None:
+    return usage if any(value is not None for value in usage.values()) else None
+
+
+def request_completion_result(
+    base_url: str,
+    api_key: str,
+    api_model: str,
+    prompt: str,
+    temperature: float | None,
+    api_format: str,
+    timeout: float = 600,
+    max_attempts: int = 1,
+) -> dict[str, object]:
+    if api_format not in ("openai", "anthropic"):
+        raise ValueError("api_format 必须是 openai 或 anthropic")
+    if type(max_attempts) is not int or max_attempts < 1:
+        raise ValueError("max_attempts 必须是正整数")
+    payload = _request_completion_payload(
+        base_url, api_key, api_model, prompt, temperature, api_format,
+        timeout=timeout, max_attempts=max_attempts,
+    )
+    usage = _completion_usage(payload, api_format) if isinstance(payload, dict) else {
+        "input_tokens": None, "output_tokens": None, "reasoning_tokens": None,
+    }
+    try:
+        text = _completion_text(payload, api_format, strict=True)
+    except RuntimeError as error:
+        raise StructuredCompletionError(
+            str(error),
+            details=CompletionFailureDetails(
+                text=_partial_completion_text(payload, api_format),
+                usage=_available_usage(usage),
+            ),
+        ) from error
+    return {
+        "text": text,
+        "usage": usage,
+    }
+
+
+def _request_completion(
+    base_url: str,
+    api_key: str,
+    api_model: str,
+    prompt: str,
+    temperature: float | None,
+    api_format: str,
+    system_prompt: str = "",
+) -> str:
+    payload = _request_completion_payload(
+        base_url, api_key, api_model, prompt, temperature, api_format, system_prompt,
+    )
+    return _completion_text(payload, api_format)
 
 
 def request_completion(

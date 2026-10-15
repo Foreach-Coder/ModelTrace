@@ -3,20 +3,45 @@ import {
   readCodexPreferences,
   writeCodexPreferences,
 } from "./automatic-test-core.mjs";
+import {
+  runCandyBatch,
+  summarizeCandyResults,
+  validateCandySettings,
+} from "./candy-test-core.mjs";
 
 const state = {
   challenges: [],
   bankId: window.DEFAULT_BANK_ID,
   bank: window.BANK_SUMMARIES[window.DEFAULT_BANK_ID],
   unified: window.UNIFIED_SUMMARY,
+  candyQuestion: null,
+  candyBatch: null,
 };
 
 const byId = (id) => document.getElementById(id);
-let codexInitialized = false;
-let codexManualPath = false;
-let codexStatusBusy = false;
-let codexModelsBusy = false;
 let automaticTesting = false;
+let candyPreparing = false;
+let candyTesting = false;
+let candyStopRequested = false;
+
+const codexUis = {
+  test: {
+    initialized: false, manualPath: false, statusBusy: false, modelsBusy: false,
+    path: "codex-path", model: "codex-model", reasoning: "codex-reasoning-effort",
+    useUserConfig: "codex-use-user-config", detect: "codex-detect",
+    modelToggle: "codex-model-toggle", modelRefresh: "codex-model-refresh",
+    modelMenu: "codex-model-menu", modelStatus: "codex-model-status",
+    runtimeStatus: "codex-runtime-status", form: "codex-test-form",
+  },
+  candy: {
+    initialized: false, manualPath: false, statusBusy: false, modelsBusy: false,
+    path: "candy-codex-path", model: "candy-codex-model", reasoning: "candy-codex-reasoning-effort",
+    useUserConfig: "candy-codex-use-user-config", detect: "candy-codex-detect",
+    modelToggle: "candy-codex-model-toggle", modelRefresh: "candy-codex-model-refresh",
+    modelMenu: "candy-codex-model-menu", modelStatus: "candy-codex-model-status",
+    runtimeStatus: "candy-codex-runtime-status", form: "candy-codex-form",
+  },
+};
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (character) => ({
@@ -49,7 +74,13 @@ function activateMode(group, name) {
   document.querySelectorAll(`#workspace-${group === "test" ? "test" : "library"} .mode-panel`).forEach((item) => {
     item.classList.toggle("active", item.id === `${group}-${name}` || item.id === `library-${name}`);
   });
-  if (group === "test" && name === "codex" && !codexInitialized) initializeCodex();
+  if (group === "test" && name === "codex" && !codexUis.test.initialized) initializeCodex("test");
+}
+
+function activateCandyMode(name) {
+  document.querySelectorAll("[data-candy-mode]").forEach((item) => item.classList.toggle("active", item.dataset.candyMode === name));
+  document.querySelectorAll("#workspace-candy .mode-panel").forEach((item) => item.classList.toggle("active", item.id === `candy-${name}`));
+  if (name === "codex" && !codexUis.candy.initialized) initializeCodex("candy");
 }
 
 async function loadChallenges() {
@@ -180,17 +211,22 @@ async function requestJson(url, payload) {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "请求失败");
+  if (!response.ok) {
+    const error = new Error(result.error || "请求失败");
+    error.status = response.status;
+    throw error;
+  }
   return result;
 }
 
-function saveCodexPreferences() {
+function saveCodexPreferences(kind = "test") {
+  const ui = codexUis[kind];
   try {
     writeCodexPreferences(window.localStorage, {
-      manualPath: codexManualPath ? byId("codex-path").value.trim() : "",
-      model: byId("codex-model").value.trim(),
-      reasoningEffort: byId("codex-reasoning-effort").value,
-      useUserConfig: byId("codex-use-user-config").checked,
+      manualPath: ui.manualPath ? byId(ui.path).value.trim() : "",
+      model: byId(ui.model).value.trim(),
+      reasoningEffort: byId(ui.reasoning).value,
+      useUserConfig: byId(ui.useUserConfig).checked,
     });
   } catch {
     // The test remains usable when browser storage is unavailable.
@@ -200,25 +236,33 @@ function saveCodexPreferences() {
 function updateAutomaticControls() {
   document.querySelectorAll("#api-test-form button[type=submit], #codex-test-form input, #codex-test-form select, #codex-test-form button")
     .forEach((element) => {
-      element.disabled = automaticTesting
-        || (codexStatusBusy && element.closest("#codex-test-form"))
-        || (codexModelsBusy && ["codex-use-user-config", "codex-model-toggle", "codex-model-refresh"].includes(element.id));
+      element.disabled = automaticTesting || candyPreparing || candyTesting
+        || (codexUis.test.statusBusy && element.closest("#codex-test-form"))
+        || (codexUis.test.modelsBusy && [codexUis.test.useUserConfig, codexUis.test.modelToggle, codexUis.test.modelRefresh].includes(element.id));
     });
+  document.querySelectorAll("#candy-api-form input, #candy-api-form select, #candy-api-form button, #candy-codex-form input, #candy-codex-form select, #candy-codex-form button")
+    .forEach((element) => {
+      element.disabled = candyPreparing || candyTesting || automaticTesting
+        || (codexUis.candy.statusBusy && element.closest("#candy-codex-form"))
+        || (codexUis.candy.modelsBusy && [codexUis.candy.useUserConfig, codexUis.candy.modelToggle, codexUis.candy.modelRefresh].includes(element.id));
+    });
+  byId("candy-stop").disabled = !candyTesting || candyStopRequested;
 }
 
-async function loadCodexModels() {
-  if (codexModelsBusy) return false;
-  codexModelsBusy = true;
+async function loadCodexModels(kind = "test") {
+  const ui = codexUis[kind];
+  if (ui.modelsBusy) return false;
+  ui.modelsBusy = true;
   updateAutomaticControls();
-  const status = byId("codex-model-status");
+  const status = byId(ui.modelStatus);
   status.hidden = false;
   status.textContent = "正在加载模型列表……";
   try {
     const result = await requestJson("/api/codex/models", {
-      codex_path: byId("codex-path").value.trim(),
-      use_user_config: byId("codex-use-user-config").checked,
+      codex_path: byId(ui.path).value.trim(),
+      use_user_config: byId(ui.useUserConfig).checked,
     });
-    byId("codex-model-menu").innerHTML = result.models.map((model) => {
+    byId(ui.modelMenu).innerHTML = result.models.map((model) => {
       const label = model.label === model.id ? "" : `<small>${escapeHtml(model.label)}</small>`;
       return `<button class="codex-model-item" type="button" role="option" data-model-id="${escapeHtml(model.id)}"><span>${escapeHtml(model.id)}</span>${label}</button>`;
     }).join("");
@@ -230,62 +274,64 @@ async function loadCodexModels() {
     status.textContent = `模型列表加载失败：${error.message}；仍可手动输入模型。`;
     return false;
   } finally {
-    codexModelsBusy = false;
+    ui.modelsBusy = false;
     updateAutomaticControls();
   }
 }
 
-async function detectCodex(path, manual, refreshModels = false) {
-  if (codexStatusBusy) return false;
-  codexStatusBusy = true;
+async function detectCodex(path, manual, refreshModels = false, kind = "test") {
+  const ui = codexUis[kind];
+  if (ui.statusBusy) return false;
+  ui.statusBusy = true;
   updateAutomaticControls();
-  setMessage(byId("codex-runtime-status"), "正在检查 Codex 路径、版本和登录状态……", "working");
+  setMessage(byId(ui.runtimeStatus), "正在检查 Codex 路径、版本和登录状态……", "working");
   try {
     const status = await requestJson("/api/codex/status", { codex_path: path });
     const sources = { desktop: "桌面版", install: "安装目录", environment: "环境变量", path: "PATH", manual: "手动路径" };
     if (status.available) {
-      byId("codex-path").value = status.path;
-      codexManualPath = manual;
+      byId(ui.path).value = status.path;
+      ui.manualPath = manual;
     }
     const details = status.available
       ? `来源：${sources[status.source] || status.source} · 版本：${status.version} · 登录：${status.authenticated ? "已登录" : "未登录"}`
       : "";
     if (!status.available || !status.authenticated) {
-      setMessage(byId("codex-runtime-status"), `${details}${details ? "。" : ""}${status.error || "Codex 不可用"}。请检查完整 codex.exe 路径，或点击自动检测；未登录时请先在 Codex 中登录。`, "error");
+      setMessage(byId(ui.runtimeStatus), `${details}${details ? "。" : ""}${status.error || "Codex 不可用"}`, "error");
       return false;
     }
-    setMessage(byId("codex-runtime-status"), details, "success");
-    if (refreshModels) await loadCodexModels();
-    saveCodexPreferences();
+    setMessage(byId(ui.runtimeStatus), details, "success");
+    if (refreshModels) await loadCodexModels(kind);
+    saveCodexPreferences(kind);
     return true;
   } catch (error) {
-    setMessage(byId("codex-runtime-status"), `无法检查 Codex：${error.message}。请重试自动检测或检查路径。`, "error");
+    setMessage(byId(ui.runtimeStatus), error.message, "error");
     return false;
   } finally {
-    codexStatusBusy = false;
+    ui.statusBusy = false;
     updateAutomaticControls();
   }
 }
 
-function initializeCodex() {
-  codexInitialized = true;
+function initializeCodex(kind = "test") {
+  const ui = codexUis[kind];
+  ui.initialized = true;
   let preferences;
   try {
     preferences = readCodexPreferences(window.localStorage);
   } catch {
     preferences = readCodexPreferences(null);
   }
-  byId("codex-path").value = preferences.manualPath;
-  byId("codex-model").value = preferences.model;
-  byId("codex-reasoning-effort").value = preferences.reasoningEffort;
-  byId("codex-use-user-config").checked = preferences.useUserConfig;
-  codexManualPath = Boolean(preferences.manualPath);
-  return detectCodex(preferences.manualPath, codexManualPath, true);
+  byId(ui.path).value = preferences.manualPath;
+  byId(ui.model).value = preferences.model;
+  byId(ui.reasoning).value = preferences.reasoningEffort;
+  byId(ui.useUserConfig).checked = preferences.useUserConfig;
+  ui.manualPath = Boolean(preferences.manualPath);
+  return detectCodex(preferences.manualPath, ui.manualPath, true, kind);
 }
 
 async function testAutomatically(event, options) {
   event.preventDefault();
-  if (automaticTesting || (options.beforeRun && codexStatusBusy)) return;
+  if (automaticTesting || candyPreparing || candyTesting || (options.beforeRun && codexUis.test.statusBusy)) return;
   automaticTesting = true;
   updateAutomaticControls();
   byId("result").hidden = true;
@@ -316,6 +362,215 @@ async function testAutomatically(event, options) {
   } finally {
     automaticTesting = false;
     updateAutomaticControls();
+  }
+}
+
+async function loadCandyQuestion() {
+  try {
+    const question = await requestJson("/api/candy/question");
+    state.candyQuestion = question;
+    byId("candy-question-prompt").textContent = question.prompt;
+    return question;
+  } catch (error) {
+    byId("candy-question-prompt").textContent = "题目加载失败";
+    setMessage(byId("candy-message"), error.message, "error");
+    return null;
+  }
+}
+
+function candyInteger(id) {
+  const raw = byId(id).value.trim();
+  return /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+}
+
+function candyStatusLabel(status) {
+  return ({
+    pending: "等待中", running: "执行中", correct: "正确", incorrect: "错误",
+    ungraded: "待判定", error: "调用失败", not_run: "未执行",
+  })[status] || status;
+}
+
+function candyValue(value, suffix = "") {
+  return value === null || value === undefined ? "未提供" : `${value}${suffix}`;
+}
+
+function candyElapsed(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "未提供";
+  return `${Number(value.toFixed(3))} 秒`;
+}
+
+function renderCandyProgress(snapshot) {
+  const planned = snapshot.plannedRounds || 0;
+  const summary = summarizeCandyResults(snapshot.results, planned);
+  byId("candy-progress-panel").hidden = false;
+  byId("candy-progress-status").textContent = candyTesting
+    ? (candyStopRequested ? "当前轮结束后停止" : `正在执行第 ${Math.min(snapshot.completedRounds + 1, planned)} 轮`)
+    : "测试完成";
+  byId("candy-progress-count").textContent = `已完成 ${summary.completedRounds}/${planned} · 未执行 ${summary.counts.not_run}`;
+  byId("candy-progress-fill").style.width = planned ? `${(summary.completedRounds / planned) * 100}%` : "0%";
+  renderCandyResults(snapshot.results, summary);
+}
+
+function renderCandyResults(results, summary) {
+  const rate = summary.correctRate === null
+    ? "未提供"
+    : `${(summary.correctRate * 100).toFixed(1)}%（${summary.counts.correct}/${summary.gradedRounds}）`;
+  byId("candy-summary").textContent = [
+    `计划轮数 ${summary.plannedRounds}`,
+    `已完成 ${summary.completedRounds}/${summary.plannedRounds}`,
+    `未执行 ${summary.counts.not_run}`,
+    `可判定 ${summary.gradedRounds}`,
+    `正确 ${summary.counts.correct}`,
+    `错误 ${summary.counts.incorrect}`,
+    `待判定 ${summary.counts.ungraded}`,
+    `调用失败 ${summary.counts.error}`,
+    `正确率 ${rate}`,
+  ].join(" · ");
+  byId("candy-result-rows").innerHTML = results.map((item) => {
+    const answer = item.answer || item.error || "未提供";
+    const statusClass = item.status === "correct" ? "ok" : item.status === "incorrect" || item.status === "error" ? "error" : "warning";
+    return `<tr>
+      <td>${item.round}</td>
+      <td><span class="status-tag ${statusClass}">${escapeHtml(candyStatusLabel(item.status))}</span></td>
+      <td>${candyValue(item.final_answer)}</td>
+      <td>${candyValue(item.usage?.input_tokens)}</td>
+      <td>${candyValue(item.usage?.output_tokens)}</td>
+      <td>${candyValue(item.usage?.reasoning_tokens)}</td>
+      <td>${candyElapsed(item.elapsed_seconds)}</td>
+      <td>${candyValue(item.tps)}</td>
+      <td>${escapeHtml(item.grading_reason || item.error || "未提供")}</td>
+      <td><details class="candy-answer-disclosure"><summary>查看回答</summary><pre>${escapeHtml(answer)}</pre></details></td>
+    </tr>`;
+  }).join("");
+  byId("candy-results").hidden = false;
+}
+
+function candyConfiguration(kind) {
+  const rounds = candyInteger(`candy-${kind}-rounds`);
+  const timeoutSeconds = candyInteger(`candy-${kind}-timeout`);
+  const validation = validateCandySettings({ rounds, timeoutSeconds });
+  if (!validation.valid) throw new Error("测试轮数或请求超时超出允许范围");
+  if (kind === "api") {
+    const baseUrl = byId("candy-api-base").value.trim();
+    const apiKey = byId("candy-api-key").value.trim();
+    const apiModel = byId("candy-api-model").value.trim();
+    const apiFormat = byId("candy-api-format").value;
+    if (!baseUrl || !apiKey || !apiModel || !["openai", "anthropic"].includes(apiFormat)) {
+      throw new Error("请完整填写 API 配置");
+    }
+    let parsedBaseUrl;
+    try {
+      parsedBaseUrl = new URL(baseUrl);
+    } catch {
+      throw new Error("Base URL 必须是有效的 HTTP 或 HTTPS 地址");
+    }
+    if (!["http:", "https:"].includes(parsedBaseUrl.protocol) || !parsedBaseUrl.hostname
+      || parsedBaseUrl.username || parsedBaseUrl.password) {
+      throw new Error("Base URL 必须是有效的 HTTP 或 HTTPS 地址");
+    }
+    return {
+      rounds, timeoutSeconds,
+      summary: `API · ${apiModel} · ${apiFormat}`,
+      endpoint: "/api/candy/api/probe",
+      payload: {
+        base_url: baseUrl, api_key: apiKey, api_model: apiModel, api_format: apiFormat,
+        temperature: optionalNumber("candy-api-temperature"),
+      },
+    };
+  }
+  const model = byId("candy-codex-model").value.trim();
+  if (!/^[A-Za-z0-9._/:-]{1,128}$/.test(model)) {
+    throw new Error("Codex 模型必须是有效的模型标识，最多 128 个字符");
+  }
+  return {
+    rounds, timeoutSeconds,
+    summary: `Codex CLI · ${model} · ${byId("candy-codex-reasoning-effort").value}`,
+    endpoint: "/api/candy/codex/probe",
+    payload: {
+      codex_path: byId("candy-codex-path").value.trim(), model,
+      reasoning_effort: byId("candy-codex-reasoning-effort").value,
+      use_user_config: byId("candy-codex-use-user-config").checked,
+    },
+  };
+}
+
+async function startCandyBatch(event, kind) {
+  event.preventDefault();
+  if (candyPreparing || candyTesting || automaticTesting) return;
+  let configuration;
+  try {
+    configuration = candyConfiguration(kind);
+  } catch (error) {
+    setMessage(byId("candy-message"), error.message, "error");
+    return;
+  }
+  candyPreparing = true;
+  updateAutomaticControls();
+  let enteredRun = false;
+  let protocolError = "";
+  try {
+    if (kind === "codex") {
+      const ui = codexUis.candy;
+      if (ui.statusBusy || !await detectCodex(ui.manualPath ? byId(ui.path).value.trim() : "", ui.manualPath, false, "candy")) return;
+      configuration.payload.codex_path = byId(ui.path).value.trim();
+      saveCodexPreferences("candy");
+    }
+    const question = await loadCandyQuestion();
+    if (!question) return;
+    if (!candyPreparing || automaticTesting || candyTesting) return;
+
+    const questionSnapshot = { ...question };
+    candyPreparing = false;
+    candyTesting = true;
+    enteredRun = true;
+    candyStopRequested = false;
+    state.candyBatch = {
+      kind, question: questionSnapshot, configuration: configuration.summary,
+      plannedRounds: configuration.rounds, results: [], summary: null,
+    };
+    setMessage(byId("candy-message"), "");
+    byId("candy-batch-title").textContent = `${kind === "api" ? "API" : "Codex"} 糖果测试`;
+    byId("candy-batch-config").textContent = configuration.summary;
+    byId("candy-batch-question").textContent = questionSnapshot.prompt;
+    byId("candy-results").hidden = false;
+    updateAutomaticControls();
+
+    const outcome = await runCandyBatch({
+      rounds: configuration.rounds,
+      shouldStop: () => candyStopRequested,
+      onUpdate: renderCandyProgress,
+      probe: async () => {
+        try {
+          return await requestJson(configuration.endpoint, {
+            ...configuration.payload,
+            question_id: questionSnapshot.question_id,
+            timeout_seconds: configuration.timeoutSeconds,
+          });
+        } catch (error) {
+          if (error.status === 409) {
+            state.candyQuestion = null;
+            candyStopRequested = true;
+          }
+          if (error.status === 400) candyStopRequested = true;
+          if (error.status === 400 || error.status === 409) protocolError = error.message;
+          throw error;
+        }
+      },
+    });
+    state.candyBatch.results = outcome.results;
+    state.candyBatch.summary = outcome.summary;
+    renderCandyResults(outcome.results, outcome.summary);
+    if (protocolError) setMessage(byId("candy-message"), protocolError, "error");
+  } finally {
+    candyPreparing = false;
+    if (enteredRun) candyTesting = false;
+    updateAutomaticControls();
+    const summary = state.candyBatch?.summary;
+    if (summary) {
+      byId("candy-progress-status").textContent = candyStopRequested && summary.counts.not_run
+        ? "已停止后续测试"
+        : "测试完成";
+    }
   }
 }
 
@@ -424,6 +679,7 @@ async function createBank(event) {
 
 document.querySelectorAll("[data-workspace]").forEach((button) => button.addEventListener("click", () => activateWorkspace(button.dataset.workspace)));
 document.querySelectorAll("[data-test-mode]").forEach((button) => button.addEventListener("click", () => activateMode("test", button.dataset.testMode)));
+document.querySelectorAll("[data-candy-mode]").forEach((button) => button.addEventListener("click", () => activateCandyMode(button.dataset.candyMode)));
 byId("bank-select").addEventListener("change", (event) => selectBank(event.target.value));
 byId("regenerate").addEventListener("click", loadChallenges);
 byId("analyze").addEventListener("click", analyzeManual);
@@ -440,20 +696,20 @@ byId("api-test-form").addEventListener("submit", (event) => testAutomatically(ev
 }));
 byId("codex-test-form").addEventListener("submit", (event) => testAutomatically(event, {
   endpoint: "/api/test/codex/probe", transport: "Codex CLI", progressIds: progressIds("codex"),
-  beforeRun: () => detectCodex(codexManualPath ? byId("codex-path").value.trim() : "", codexManualPath),
+  beforeRun: () => detectCodex(codexUis.test.manualPath ? byId("codex-path").value.trim() : "", codexUis.test.manualPath),
   configuration: () => ({
     codex_path: byId("codex-path").value.trim(), model: byId("codex-model").value.trim(),
     reasoning_effort: byId("codex-reasoning-effort").value,
     use_user_config: byId("codex-use-user-config").checked,
   }),
-  onSuccess: saveCodexPreferences,
+  onSuccess: () => saveCodexPreferences("test"),
 }));
 byId("codex-detect").addEventListener("click", () => {
-  codexManualPath = false;
-  saveCodexPreferences();
-  return detectCodex("", false, true);
+  codexUis.test.manualPath = false;
+  saveCodexPreferences("test");
+  return detectCodex("", false, true, "test");
 });
-byId("codex-model-refresh").addEventListener("click", loadCodexModels);
+byId("codex-model-refresh").addEventListener("click", () => loadCodexModels("test"));
 byId("codex-model-toggle").addEventListener("click", () => {
   const menu = byId("codex-model-menu");
   menu.hidden = !menu.hidden;
@@ -464,12 +720,44 @@ byId("codex-model-menu").addEventListener("click", (event) => {
   byId("codex-model").value = option.dataset.modelId;
   byId("codex-model-menu").hidden = true;
 });
-byId("codex-use-user-config").addEventListener("change", loadCodexModels);
-byId("codex-path").addEventListener("input", () => { codexManualPath = Boolean(byId("codex-path").value.trim()); });
+byId("codex-use-user-config").addEventListener("change", () => loadCodexModels("test"));
+byId("codex-path").addEventListener("input", () => { codexUis.test.manualPath = Boolean(byId("codex-path").value.trim()); });
 byId("codex-path").addEventListener("blur", (event) => {
   // Let the clicked button run its own discovery/preflight before disabling it.
   if (event.relatedTarget?.closest("#codex-test-form button")) return;
-  if (!automaticTesting && codexManualPath) detectCodex(byId("codex-path").value.trim(), true, true);
+  if (!automaticTesting && !candyTesting && codexUis.test.manualPath) detectCodex(byId("codex-path").value.trim(), true, true, "test");
+});
+byId("candy-api-form").addEventListener("submit", (event) => startCandyBatch(event, "api"));
+byId("candy-codex-form").addEventListener("submit", (event) => startCandyBatch(event, "codex"));
+byId("candy-stop").addEventListener("click", () => {
+  if (!candyTesting) return;
+  candyStopRequested = true;
+  byId("candy-progress-status").textContent = "当前轮结束后停止";
+  updateAutomaticControls();
+});
+byId("candy-codex-detect").addEventListener("click", () => {
+  codexUis.candy.manualPath = false;
+  saveCodexPreferences("candy");
+  return detectCodex("", false, true, "candy");
+});
+byId("candy-codex-model-refresh").addEventListener("click", () => loadCodexModels("candy"));
+byId("candy-codex-model-toggle").addEventListener("click", () => {
+  const menu = byId("candy-codex-model-menu");
+  menu.hidden = !menu.hidden;
+});
+byId("candy-codex-model-menu").addEventListener("click", (event) => {
+  const option = event.target.closest("[data-model-id]");
+  if (!option) return;
+  byId("candy-codex-model").value = option.dataset.modelId;
+  byId("candy-codex-model-menu").hidden = true;
+});
+byId("candy-codex-use-user-config").addEventListener("change", () => loadCodexModels("candy"));
+byId("candy-codex-path").addEventListener("input", () => { codexUis.candy.manualPath = Boolean(byId("candy-codex-path").value.trim()); });
+byId("candy-codex-path").addEventListener("blur", (event) => {
+  if (event.relatedTarget?.closest("#candy-codex-form button")) return;
+  if (!automaticTesting && !candyTesting && codexUis.candy.manualPath) {
+    detectCodex(byId("candy-codex-path").value.trim(), true, true, "candy");
+  }
 });
 byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });
@@ -477,3 +765,4 @@ byId("create-bank-form").addEventListener("submit", createBank);
 
 renderInventory();
 loadChallenges();
+loadCandyQuestion();

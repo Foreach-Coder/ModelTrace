@@ -10,6 +10,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from completion_errors import CompletionFailureDetails, StructuredCompletionError
+
 
 @dataclass(frozen=True)
 class CodexRuntime:
@@ -26,7 +28,7 @@ class CodexAuthenticationError(RuntimeError):
     """Codex has no usable existing login."""
 
 
-class CodexExecutionError(RuntimeError):
+class CodexExecutionError(StructuredCompletionError):
     """An isolated Codex request failed."""
 
 
@@ -261,7 +263,7 @@ def _structured_error(stdout: str) -> str:
     return diagnostic
 
 
-def _terminate_process_tree(process: subprocess.Popen) -> None:
+def _terminate_process_tree(process: subprocess.Popen) -> object:
     try:
         subprocess.run(
             ["taskkill", "/PID", str(int(process.pid)), "/T", "/F"],
@@ -274,15 +276,85 @@ def _terminate_process_tree(process: subprocess.Popen) -> None:
     except OSError:
         pass
     try:
-        process.communicate(timeout=5)
+        recovered = process.communicate(timeout=5)
+        if isinstance(recovered, tuple) and recovered:
+            return recovered[0]
     except (OSError, UnicodeError, subprocess.SubprocessError):
         pass
+    return None
 
 
-def request_codex_completion(
+def _captured_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return ""
+
+
+def _merge_captured_stdout(initial: object, recovered: object) -> str:
+    """Combine timeout and reap output without duplicating a repeated buffer."""
+    before = _captured_text(initial)
+    after = _captured_text(recovered)
+    if not before:
+        return after
+    if not after:
+        return before
+    if after.startswith(before):
+        return after
+    if before.startswith(after):
+        return before
+    separator = "" if before.endswith("\n") or after.startswith("\n") else "\n"
+    return before + separator + after
+
+
+def _completed_turn_usage(stdout: str) -> dict[str, int | None]:
+    """Read the last reported usage mapping without inferring missing counts."""
+    usage: dict[str, int | None] = {
+        "input_tokens": None, "output_tokens": None, "reasoning_tokens": None,
+    }
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+            continue
+        reported = event.get("usage")
+        if not isinstance(reported, dict) or not any(key in reported for key in usage):
+            continue
+        parsed = {
+            key: value if type(value := reported.get(key)) is int and value >= 0 else None
+            for key in usage
+        }
+        if any(value is not None for value in parsed.values()):
+            usage = parsed
+    return usage
+
+
+def _available_usage(usage: dict[str, int | None]) -> dict[str, int | None] | None:
+    return usage if any(value is not None for value in usage.values()) else None
+
+
+def _failure_details(output_path: Path, stdout: str) -> CompletionFailureDetails:
+    """Best-effort partial data collection that never masks the original failure."""
+    answer = None
+    try:
+        if output_path.exists():
+            answer = output_path.read_text(encoding="utf-8").strip() or None
+    except (OSError, UnicodeError):
+        pass
+    try:
+        usage = _available_usage(_completed_turn_usage(stdout))
+    except (TypeError, ValueError):
+        usage = None
+    return CompletionFailureDetails(text=answer, usage=usage)
+
+
+def _execute_codex_completion(
     codex_path: str, model: str, reasoning_effort: str, prompt: str,
-    timeout: int = 120, use_user_config: bool = False,
-) -> str:
+    timeout: int, use_user_config: bool,
+) -> tuple[str, str]:
     """Execute one authenticated, ephemeral, read-only Codex challenge."""
     if not isinstance(model, str) or re.fullmatch(r"[A-Za-z0-9._/:-]{1,128}", model) is None:
         raise ValueError("model 必须是有效的模型标识，最多 128 个字符")
@@ -315,21 +387,63 @@ def request_codex_completion(
         try:
             stdout, stderr = process.communicate(input=prompt, timeout=timeout)
         except subprocess.TimeoutExpired as error:
-            _terminate_process_tree(process)
-            raise CodexExecutionError(f"Codex 执行超过 {timeout} 秒，已终止") from error
+            recovered_stdout = _terminate_process_tree(process)
+            captured_stdout = _merge_captured_stdout(error.output, recovered_stdout)
+            raise CodexExecutionError(
+                f"Codex 执行超过 {timeout} 秒，已终止",
+                details=_failure_details(output_path, captured_stdout),
+            ) from error
         except (OSError, UnicodeError, subprocess.SubprocessError) as error:
-            _terminate_process_tree(process)
-            raise CodexExecutionError("Codex 执行通信失败") from error
+            recovered_stdout = _terminate_process_tree(process)
+            raise CodexExecutionError(
+                "Codex 执行通信失败",
+                details=_failure_details(output_path, _captured_text(recovered_stdout)),
+            ) from error
+        usage = _available_usage(_completed_turn_usage(stdout))
+        try:
+            answer = output_path.read_text(encoding="utf-8").strip() if output_path.exists() else ""
+        except (OSError, UnicodeError) as error:
+            raise CodexExecutionError(
+                "Codex 启动失败或无法读取回答",
+                details=CompletionFailureDetails(usage=usage),
+            ) from error
         if process.returncode != 0:
             raw_diagnostic = _structured_error(stdout) or stderr
             diagnostic = _sanitized_diagnostic(raw_diagnostic)
-            raise CodexExecutionError("Codex 执行失败" + (f"：{diagnostic}" if diagnostic else ""))
-        answer = output_path.read_text(encoding="utf-8").strip()
+            raise CodexExecutionError(
+                "Codex 执行失败" + (f"：{diagnostic}" if diagnostic else ""),
+                details=CompletionFailureDetails(text=answer or None, usage=usage),
+            )
         if not answer:
-            raise CodexExecutionError("Codex 未返回有效回答")
-        return answer
+            raise CodexExecutionError(
+                "Codex 未返回有效回答",
+                details=CompletionFailureDetails(usage=usage),
+            )
+        return answer, stdout
     except (OSError, UnicodeError) as error:
         raise CodexExecutionError("Codex 启动失败或无法读取回答") from error
     finally:
         if output_path is not None:
             output_path.unlink(missing_ok=True)
+
+
+def request_codex_completion_result(
+    codex_path: str, model: str, reasoning_effort: str, prompt: str,
+    timeout: int = 600, use_user_config: bool = False,
+) -> dict[str, object]:
+    """Return final text and nullable usage from one isolated Codex request."""
+    answer, stdout = _execute_codex_completion(
+        codex_path, model, reasoning_effort, prompt, timeout, use_user_config,
+    )
+    return {"text": answer, "usage": _completed_turn_usage(stdout)}
+
+
+def request_codex_completion(
+    codex_path: str, model: str, reasoning_effort: str, prompt: str,
+    timeout: int = 120, use_user_config: bool = False,
+) -> str:
+    """Preserve the text-only request and its existing 120-second timeout."""
+    answer, _ = _execute_codex_completion(
+        codex_path, model, reasoning_effort, prompt, timeout, use_user_config,
+    )
+    return answer

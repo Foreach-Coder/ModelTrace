@@ -7,6 +7,28 @@ from app import app
 
 
 class TestPageTests(unittest.TestCase):
+    def test_page_exposes_independent_candy_workspace_and_controls(self):
+        html = app.test_client().get("/").get_data(as_text=True)
+
+        test_position = html.index('data-workspace="test"')
+        candy_position = html.index('data-workspace="candy"')
+        library_position = html.index('data-workspace="library"')
+        self.assertLess(test_position, candy_position)
+        self.assertLess(candy_position, library_position)
+        self.assertIn('id="workspace-candy"', html)
+        self.assertIn('data-candy-mode="api"', html)
+        self.assertIn('data-candy-mode="codex"', html)
+        self.assertIn('id="candy-question-disclosure"', html)
+        self.assertIn('id="candy-question-prompt"', html)
+        self.assertIn('id="candy-api-timeout" type="number" min="30" max="1800" value="600"', html)
+        self.assertIn('id="candy-codex-timeout" type="number" min="30" max="1800" value="600"', html)
+        self.assertIn('id="candy-api-rounds" type="number" min="1" max="50" value="5"', html)
+        self.assertIn('id="candy-codex-rounds" type="number" min="1" max="50" value="5"', html)
+        self.assertIn('id="candy-stop"', html)
+        self.assertIn('id="candy-summary"', html)
+        self.assertIn('id="candy-result-rows"', html)
+        self.assertIn('id="candy-answer-disclosure"', html)
+
     def test_model_test_page_offers_codex_automatic_testing(self):
         html = app.test_client().get("/").get_data(as_text=True)
 
@@ -102,6 +124,8 @@ const detect = element('codex-detect');
             cwd=Path(__file__).resolve().parents[1],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
@@ -165,6 +189,92 @@ await new Promise(resolve => setImmediate(resolve));
             cwd=Path(__file__).resolve().parents[1],
             capture_output=True,
             text=True,
+            timeout=15,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def run_candy_ui_scenario(self, scenario):
+        script = r"""
+import assert from 'node:assert/strict';
+const elements = new Map();
+function element(id) {
+  if (!elements.has(id)) elements.set(id, {
+    id, value: '', checked: false, hidden: true, open: false, textContent: '', innerHTML: '', className: '',
+    _disabled: false, style: {}, dataset: {}, handlers: {},
+    get disabled() { return this._disabled; },
+    set disabled(value) { this._disabled = Boolean(value); },
+    classList: { toggle() {} },
+    addEventListener(type, handler) { this.handlers[type] = handler; },
+    closest(selector) {
+      if (selector === '#codex-test-form button') return id.startsWith('codex-') ? this : null;
+      if (selector === '#candy-codex-form button') return id.startsWith('candy-codex-') ? this : null;
+      if (selector === '#codex-test-form') return id.startsWith('codex-') ? element('codex-test-form') : null;
+      if (selector === '#candy-codex-form') return id.startsWith('candy-codex-') ? element('candy-codex-form') : null;
+      return null;
+    },
+    scrollIntoView() {},
+  });
+  return elements.get(id);
+}
+const modelControls = ['codex-path', 'codex-model', 'codex-reasoning-effort', 'codex-use-user-config',
+  'codex-detect', 'codex-model-toggle', 'codex-model-refresh', 'codex-submit', 'api-submit'].map(element);
+const candyControls = ['candy-api-base', 'candy-api-key', 'candy-api-model', 'candy-api-format',
+  'candy-api-temperature', 'candy-api-rounds', 'candy-api-timeout', 'candy-api-start',
+  'candy-codex-path', 'candy-codex-model', 'candy-codex-reasoning-effort',
+  'candy-codex-use-user-config', 'candy-codex-detect', 'candy-codex-model-toggle',
+  'candy-codex-model-refresh', 'candy-codex-rounds', 'candy-codex-timeout',
+  'candy-codex-start'].map(element);
+const saved = new Map();
+globalThis.window = {
+  DEFAULT_BANK_ID: 'bank', BANK_SUMMARIES: {bank: {label: 'Test', models: []}},
+  UNIFIED_SUMMARY: {model_count: 0},
+  localStorage: {getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value)},
+  setTimeout, setInterval, clearInterval,
+};
+const testNav = element('test-nav'); testNav.dataset.workspace = 'test';
+const candyNav = element('candy-nav'); candyNav.dataset.workspace = 'candy';
+const libraryNav = element('library-nav'); libraryNav.dataset.workspace = 'library';
+const candyApiTab = element('candy-api-tab'); candyApiTab.dataset.candyMode = 'api';
+const candyCodexTab = element('candy-codex-tab'); candyCodexTab.dataset.candyMode = 'codex';
+globalThis.document = {
+  getElementById: element,
+  querySelectorAll: selector => {
+    if (selector === '[data-workspace]') return [testNav, candyNav, libraryNav];
+    if (selector === '[data-test-mode]') return [];
+    if (selector === '[data-candy-mode]') return [candyApiTab, candyCodexTab];
+    if (selector.startsWith('#api-test-form')) return modelControls;
+    if (selector.startsWith('#candy-api-form')) return candyControls;
+    return [];
+  },
+};
+const question = {question_id: 'candy-v1', title: '糖果题', prompt: '题目 <final-answer>整数</final-answer>'};
+const probePayloads = [];
+const probeReplies = [
+  {question_id: 'candy-v1', status: 'correct', answer: '过程 <img src=x onerror=alert(1)>\n<final-answer>21</final-answer>', final_answer: 21,
+    grading_reason: '答案正确', usage: {input_tokens: 10, output_tokens: 5, reasoning_tokens: 0}, elapsed_seconds: 2.0636650000233203, tps: 2.5, error: null},
+  {question_id: 'candy-v1', status: 'ungraded', answer: '没有标签', final_answer: null,
+    grading_reason: '缺少最终答案标签', usage: null, elapsed_seconds: 3, tps: null, error: null},
+];
+globalThis.fetch = async (url, options) => {
+  if (url === '/api/challenges') return {ok: true, status: 200, json: async () => ({challenges: []})};
+  if (url === '/api/candy/question') return {ok: true, status: 200, json: async () => question};
+  if (url === '/api/candy/api/probe') {
+    probePayloads.push(JSON.parse(options.body));
+    return {ok: true, status: 200, json: async () => probeReplies.shift()};
+  }
+  throw new Error(`Unexpected URL: ${url}`);
+};
+await import('./static/app.js');
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(typeof element('candy-api-form').handlers.submit, 'function', 'candy API form must register a submit handler');
+""" + scenario
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
@@ -376,6 +486,249 @@ for (let attempt = 1; attempt <= 6; attempt += 1) {
 }
 assert.match(element('test-message').textContent, /6 次未采用/);
 assert.match(element('test-message').textContent, /挑战 6：failure-6/);
+""")
+
+    def test_candy_api_batch_uses_frozen_question_and_renders_answers_safely(self):
+        self.run_candy_ui_scenario(r"""
+assert.equal(element('candy-question-prompt').textContent, question.prompt);
+element('candy-api-base').value = 'https://example.test/v1';
+element('candy-api-key').value = 'private-key';
+element('candy-api-model').value = 'model-a';
+element('candy-api-format').value = 'openai';
+element('candy-api-temperature').value = '';
+element('candy-api-rounds').value = '2';
+element('candy-api-timeout').value = '600';
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.equal(probePayloads.length, 2);
+for (const payload of probePayloads) {
+  assert.equal(payload.question_id, 'candy-v1');
+  assert.equal(payload.timeout_seconds, 600);
+  assert.equal(payload.api_format, 'openai');
+  assert.equal(payload.api_key, 'private-key');
+}
+assert.equal(element('candy-batch-question').textContent, question.prompt);
+assert.match(element('candy-summary').textContent, /已完成 2\/2/);
+assert.match(element('candy-summary').textContent, /计划轮数 2/);
+assert.match(element('candy-summary').textContent, /未执行 0/);
+assert.match(element('candy-summary').textContent, /可判定 1/);
+const rows = element('candy-result-rows').innerHTML;
+assert.match(rows, /&lt;img src=x onerror=alert\(1\)&gt;/);
+assert.doesNotMatch(rows, /<img src=x/);
+assert.match(rows, /待判定/);
+assert.match(rows, /缺少最终答案标签/);
+assert.match(rows, /2\.064 秒/);
+assert.doesNotMatch(rows, /2\.0636650000233203/);
+libraryNav.handlers.click();
+candyNav.handlers.click();
+candyApiTab.handlers.click();
+assert.equal(element('candy-result-rows').innerHTML, rows, 'navigation and tab switching must preserve current results');
+const persisted = [...saved.values()].join('\n');
+for (const secret of ['private-key', '<img src=x', '没有标签', '<final-answer>21</final-answer>']) {
+  assert.doesNotMatch(persisted, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    'API keys, answers, and results must not be persisted');
+}
+""")
+
+    def test_invalid_candy_api_preflight_preserves_previous_batch(self):
+        self.run_candy_ui_scenario(r"""
+element('candy-api-base').value = 'https://example.test/v1';
+element('candy-api-key').value = 'private-key';
+element('candy-api-model').value = 'model-a';
+element('candy-api-format').value = 'openai';
+element('candy-api-temperature').value = '';
+element('candy-api-rounds').value = '1';
+element('candy-api-timeout').value = '600';
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+const previousSummary = element('candy-summary').textContent;
+const previousRows = element('candy-result-rows').innerHTML;
+element('candy-api-base').value = 'not-a-url';
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.equal(probePayloads.length, 1, 'invalid configuration must not start another round');
+assert.equal(element('candy-summary').textContent, previousSummary);
+assert.equal(element('candy-result-rows').innerHTML, previousRows);
+assert.match(element('candy-message').textContent, /Base URL/);
+""")
+
+    def test_candy_codex_submission_uses_selected_model_and_user_config(self):
+        self.run_candy_ui_scenario(r"""
+const baseFetch = globalThis.fetch;
+let statusCalls = 0;
+const codexPayloads = [];
+globalThis.fetch = async (url, options) => {
+  if (url === '/api/codex/status') {
+    statusCalls += 1;
+    return {ok: true, status: 200, json: async () => ({available: true, authenticated: true,
+      path: 'C:\\desktop\\codex.exe', source: 'desktop', version: 'test-version', error: ''})};
+  }
+  if (url === '/api/codex/models') return {ok: true, status: 200, json: async () => ({models: [
+    {id: 'deepseek-flash', label: 'DeepSeek Flash'},
+  ]})};
+  if (url === '/api/candy/codex/probe') {
+    codexPayloads.push(JSON.parse(options.body));
+    return {ok: true, status: 200, json: async () => ({question_id: 'candy-v1', status: 'correct',
+      answer: 'Codex answer <final-answer>21</final-answer>', final_answer: 21,
+      grading_reason: '答案正确', usage: null, elapsed_seconds: 1, tps: null, error: null})};
+  }
+  return baseFetch(url, options);
+};
+candyCodexTab.handlers.click();
+await new Promise(resolve => setImmediate(resolve));
+element('candy-codex-model').value = 'deepseek-flash';
+element('candy-codex-reasoning-effort').value = 'high';
+element('candy-codex-use-user-config').checked = true;
+element('candy-codex-rounds').value = '1';
+element('candy-codex-timeout').value = '600';
+await element('candy-codex-form').handlers.submit({preventDefault() {}});
+assert.equal(codexPayloads.length, 1);
+assert.equal(codexPayloads[0].model, 'deepseek-flash');
+assert.equal(codexPayloads[0].use_user_config, true);
+assert.equal(codexPayloads[0].reasoning_effort, 'high');
+assert.equal(codexPayloads[0].codex_path, 'C:\\desktop\\codex.exe');
+const previousRows = element('candy-result-rows').innerHTML;
+const previousStatusCalls = statusCalls;
+element('candy-codex-model').value = 'bad model';
+await element('candy-codex-form').handlers.submit({preventDefault() {}});
+assert.equal(statusCalls, previousStatusCalls, 'an invalid model must be rejected before Codex preflight');
+assert.equal(codexPayloads.length, 1);
+assert.equal(element('candy-result-rows').innerHTML, previousRows);
+assert.match(element('candy-message').textContent, /模型/);
+const persisted = [...saved.values()].join('\n');
+assert.doesNotMatch(persisted, /Codex answer|final-answer|调用失败/);
+""")
+
+    def test_candy_codex_preflight_holds_global_test_mutex(self):
+        self.run_candy_ui_scenario(r"""
+element('candy-codex-model').value = 'deepseek-flash';
+element('candy-codex-reasoning-effort').value = 'high';
+element('candy-codex-use-user-config').checked = true;
+element('candy-codex-rounds').value = '1';
+element('candy-codex-timeout').value = '600';
+element('candy-api-base').value = 'https://example.test/v1';
+element('candy-api-key').value = 'private-key';
+element('candy-api-model').value = 'model-a';
+element('candy-api-format').value = 'openai';
+element('candy-api-rounds').value = '1';
+element('candy-api-timeout').value = '600';
+let resolveStatus;
+let candyApiProbes = 0;
+let challengeLoads = 0;
+globalThis.fetch = async (url) => {
+  if (url === '/api/codex/status') return new Promise(resolve => { resolveStatus = resolve; });
+  if (url === '/api/candy/api/probe') { candyApiProbes += 1; throw new Error('must not run'); }
+  if (url === '/api/challenges') { challengeLoads += 1; return {ok: true, status: 200, json: async () => ({challenges: []})}; }
+  if (url === '/api/candy/question') return {ok: true, status: 200, json: async () => question};
+  throw new Error(`Unexpected URL: ${url}`);
+};
+const codexRun = element('candy-codex-form').handlers.submit({preventDefault() {}});
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(element('candy-api-start').disabled, true);
+assert.equal(element('api-submit').disabled, true);
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+await element('api-test-form').handlers.submit({preventDefault() {}});
+assert.equal(candyApiProbes, 0, 'Candy API must not start during Codex preflight');
+assert.equal(challengeLoads, 0, 'fingerprint automatic test must not start during Candy preflight');
+resolveStatus({ok: true, status: 200, json: async () => ({available: false, authenticated: false,
+  path: '', source: '', version: '', error: 'Codex unavailable'})});
+await codexRun;
+assert.equal(element('candy-api-start').disabled, false);
+assert.equal(element('api-submit').disabled, false);
+""")
+
+    def test_candy_stop_waits_for_current_round_and_marks_remaining_rows(self):
+        self.run_candy_ui_scenario(r"""
+element('candy-api-base').value = 'https://example.test/v1';
+element('candy-api-key').value = 'private-key';
+element('candy-api-model').value = 'model-a';
+element('candy-api-format').value = 'openai';
+element('candy-api-rounds').value = '3';
+element('candy-api-timeout').value = '600';
+let resolveProbe;
+let probes = 0;
+globalThis.fetch = async (url) => {
+  if (url === '/api/challenges') return {ok: true, status: 200, json: async () => ({challenges: []})};
+  if (url === '/api/candy/question') return {ok: true, status: 200, json: async () => question};
+  if (url === '/api/candy/api/probe') {
+    probes += 1;
+    return new Promise(resolve => { resolveProbe = resolve; });
+  }
+  throw new Error(`Unexpected URL: ${url}`);
+};
+const running = element('candy-api-form').handlers.submit({preventDefault() {}});
+await new Promise(resolve => setImmediate(resolve));
+assert.match(element('candy-result-rows').innerHTML, /执行中/);
+assert.equal((element('candy-result-rows').innerHTML.match(/等待中/g) || []).length, 2);
+element('candy-stop').handlers.click();
+assert.match(element('candy-progress-status').textContent, /当前轮结束后停止/);
+resolveProbe({ok: true, status: 200, json: async () => ({question_id: 'candy-v1', status: 'correct',
+  answer: '<final-answer>21</final-answer>', final_answer: 21, grading_reason: '答案正确',
+  usage: null, elapsed_seconds: 1, tps: null, error: null})});
+await running;
+assert.equal(probes, 1);
+assert.equal((element('candy-result-rows').innerHTML.match(/未执行/g) || []).length, 2);
+assert.match(element('candy-summary').textContent, /已完成 1\/3/);
+assert.match(element('candy-summary').textContent, /未执行 2/);
+""")
+
+    def test_candy_refreshes_question_and_stops_after_version_or_parameter_error(self):
+        self.run_candy_ui_scenario(r"""
+element('candy-api-base').value = 'https://example.test/v1';
+element('candy-api-key').value = 'private-key';
+element('candy-api-model').value = 'model-a';
+element('candy-api-format').value = 'openai';
+element('candy-api-rounds').value = '1';
+element('candy-api-timeout').value = '600';
+let questionGets = 0;
+let nextQuestionVersion = 2;
+const seenQuestionIds = [];
+let failNextQuestion = false;
+globalThis.fetch = async (url, options) => {
+  if (url === '/api/challenges') return {ok: true, status: 200, json: async () => ({challenges: []})};
+  if (url === '/api/candy/question') {
+    questionGets += 1;
+    if (failNextQuestion) {
+      failNextQuestion = false;
+      return {ok: false, status: 503, json: async () => ({error: 'question unavailable'})};
+    }
+    const version = nextQuestionVersion;
+    nextQuestionVersion += 1;
+    return {ok: true, status: 200, json: async () => ({
+      question_id: `candy-v${version}`, title: '糖果题', prompt: `prompt-${version}`,
+    })};
+  }
+  if (url === '/api/candy/api/probe') {
+    const payload = JSON.parse(options.body);
+    seenQuestionIds.push(payload.question_id);
+    if (payload.question_id === 'candy-v3') {
+      return {ok: false, status: 409, json: async () => ({error: '题目版本已变更'})};
+    }
+    if (payload.question_id === 'candy-v5') {
+      return {ok: false, status: 400, json: async () => ({error: '参数无效'})};
+    }
+    return {ok: true, status: 200, json: async () => ({question_id: payload.question_id,
+      status: 'correct', answer: '<final-answer>21</final-answer>', final_answer: 21,
+      grading_reason: '答案正确', usage: null, elapsed_seconds: 1, tps: null, error: null})};
+  }
+  throw new Error(`Unexpected URL: ${url}`);
+};
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.deepEqual(seenQuestionIds, ['candy-v2']);
+const previousRows = element('candy-result-rows').innerHTML;
+failNextQuestion = true;
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.equal(element('candy-result-rows').innerHTML, previousRows, 'question fetch failure preserves old batch');
+element('candy-api-rounds').value = '3';
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.deepEqual(seenQuestionIds, ['candy-v2', 'candy-v3']);
+assert.equal((element('candy-result-rows').innerHTML.match(/未执行/g) || []).length, 2);
+element('candy-api-rounds').value = '1';
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.deepEqual(seenQuestionIds, ['candy-v2', 'candy-v3', 'candy-v4'],
+  'the run after a 409 must fetch and use a fresh question');
+element('candy-api-rounds').value = '3';
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.deepEqual(seenQuestionIds, ['candy-v2', 'candy-v3', 'candy-v4', 'candy-v5'],
+  'an HTTP 400 must consume only the current round');
+assert.equal((element('candy-result-rows').innerHTML.match(/未执行/g) || []).length, 2);
 """)
 
 

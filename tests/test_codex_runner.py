@@ -10,6 +10,15 @@ from unittest.mock import patch
 import codex_runner
 
 
+COMPLETED_TURN_JSONL = '''\
+{"type":"thread.started","thread_id":"019abcde-1234-7000-8000-123456789abc"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Let me calculate."}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"stdout is not the final output file"}}
+{"type":"turn.completed","usage":{"input_tokens":184,"cached_input_tokens":64,"output_tokens":37,"reasoning_tokens":12}}
+'''
+
+
 def version_result(version):
     return subprocess.CompletedProcess(
         args=[], returncode=0, stdout=f"codex-cli {version}\n", stderr=""
@@ -253,7 +262,10 @@ class CodexModelCatalogTests(RuntimeFixtures):
 class FakeCodexProcess:
     """Process boundary double; output files and adapter cleanup stay real."""
 
-    def __init__(self, args, kwargs, *, answer, returncode, stdout, stderr, failure, missing_output):
+    def __init__(
+        self, args, kwargs, *, answer, returncode, stdout, stderr, failure,
+        missing_output, write_before_failure,
+    ):
         self.args = args
         self.kwargs = kwargs
         self.answer = answer
@@ -262,6 +274,7 @@ class FakeCodexProcess:
         self.stderr = stderr
         self.failure = failure
         self.missing_output = missing_output
+        self.write_before_failure = write_before_failure
         self.pid = 4321
         self.output_path = Path(args[args.index("--output-last-message") + 1])
         self.communications = []
@@ -271,6 +284,8 @@ class FakeCodexProcess:
     def communicate(self, input=None, timeout=None):
         self.communications.append((input, timeout))
         if self.failure is not None and len(self.communications) == 1:
+            if self.write_before_failure and not self.missing_output:
+                self.output_path.write_text(self.answer, encoding="utf-8")
             raise self.failure
         if self.killed:
             self.reaped = True
@@ -378,6 +393,7 @@ class CodexExecutionTests(RuntimeFixtures):
         self.failure = None
         self.start_failure = None
         self.missing_output = False
+        self.write_before_failure = False
         self.taskkill_failure = None
         self.taskkill_calls = []
         self.output_paths = []
@@ -401,6 +417,7 @@ class CodexExecutionTests(RuntimeFixtures):
             args, kwargs, answer=self.answer, returncode=self.returncode,
             stdout=self.stdout, stderr=self.stderr, failure=self.failure,
             missing_output=self.missing_output,
+            write_before_failure=self.write_before_failure,
         )
         self.processes.append(process)
         return process
@@ -410,6 +427,11 @@ class CodexExecutionTests(RuntimeFixtures):
             str(self.codex), model, effort, "challenge", timeout=timeout,
             use_user_config=use_user_config,
         )
+
+    def request_result(self, **kwargs):
+        request = getattr(codex_runner, "request_codex_completion_result", None)
+        self.assertTrue(callable(request), "structured Codex completion entry point is missing")
+        return request(str(self.codex), "gpt-6-astra", "low", "challenge", **kwargs)
 
     def assert_output_removed(self):
         self.assertTrue(self.output_paths)
@@ -616,6 +638,313 @@ class CodexExecutionTests(RuntimeFixtures):
             self.request()
         self.assertTrue(self.processes[0].killed)
         self.assertTrue(self.processes[0].reaped)
+        self.assert_output_removed()
+
+    def test_result_reads_final_file_and_completed_turn_usage(self):
+        self.stdout = COMPLETED_TURN_JSONL
+        self.answer = "  <final-answer>21</final-answer>\n"
+
+        self.assertEqual(self.request_result(), {
+            "text": "<final-answer>21</final-answer>",
+            "usage": {"input_tokens": 184, "output_tokens": 37, "reasoning_tokens": 12},
+        })
+        self.assertEqual(len(self.processes), 1)
+        self.assertEqual(self.processes[0].communications, [("challenge", 600)])
+        self.assert_output_removed()
+
+    def test_result_does_not_infer_missing_reasoning_from_output_or_model_text(self):
+        self.stdout = '''\
+{"type":"thread.started","thread_id":"019abcde-1234-7000-8000-123456789abc"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I used 100 reasoning tokens."}}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}
+'''
+        self.assertEqual(self.request_result()["usage"], {
+            "input_tokens": 100, "output_tokens": 30, "reasoning_tokens": None,
+        })
+
+    def test_result_ignores_malformed_and_unrelated_jsonl_lines(self):
+        self.stdout = '''\
+not-json
+{"type":"turn.completed","usage":
+null
+[]
+42
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"answer"},"usage":{"input_tokens":999,"output_tokens":888}}
+{"type":"turn.completed","usage":{"input_tokens":11,"cached_input_tokens":0,"output_tokens":7}}
+trailing noise
+'''
+        self.assertEqual(self.request_result()["usage"], {
+            "input_tokens": 11, "output_tokens": 7, "reasoning_tokens": None,
+        })
+
+    def test_result_last_valid_usage_wins_without_accumulating_or_reusing_fields(self):
+        self.stdout = COMPLETED_TURN_JSONL + '''\
+{"type":"turn.completed","usage":{"input_tokens":25,"cached_input_tokens":0,"output_tokens":9}}
+{"type":"turn.completed"}
+{"type":"turn.completed","usage":null}
+{"type":"turn.completed","usage":[]}
+{"type":"turn.completed","usage":{}}
+{"type":"turn.completed","usage":{"unrelated":99}}
+'''
+        self.assertEqual(self.request_result()["usage"], {
+            "input_tokens": 25, "output_tokens": 9, "reasoning_tokens": None,
+        })
+
+    def test_result_preserves_null_and_real_zero_usage(self):
+        for usage, expected in (
+            ({"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0},
+             {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}),
+            ({"input_tokens": None, "output_tokens": None, "reasoning_tokens": None},
+             {"input_tokens": None, "output_tokens": None, "reasoning_tokens": None}),
+            ({"output_tokens": 8},
+             {"input_tokens": None, "output_tokens": 8, "reasoning_tokens": None}),
+        ):
+            with self.subTest(usage=usage):
+                self.stdout = json.dumps({"type": "turn.completed", "usage": usage})
+                self.assertEqual(self.request_result()["usage"], expected)
+                self.assert_output_removed()
+
+    def test_result_all_invalid_or_null_counts_do_not_replace_previous_valid_usage(self):
+        valid_turn = '{"type":"turn.completed","usage":{"input_tokens":42,"output_tokens":9}}\n'
+        for invalid_usage in (
+            {"input_tokens": "bad", "output_tokens": -1, "reasoning_tokens": True},
+            {"input_tokens": None, "output_tokens": None, "reasoning_tokens": None},
+            {"input_tokens": False, "output_tokens": 1.5, "reasoning_tokens": {}},
+        ):
+            with self.subTest(invalid_usage=invalid_usage):
+                self.stdout = valid_turn + json.dumps({
+                    "type": "turn.completed", "usage": invalid_usage,
+                })
+                self.assertEqual(self.request_result()["usage"], {
+                    "input_tokens": 42, "output_tokens": 9, "reasoning_tokens": None,
+                })
+                self.assert_output_removed()
+
+    def test_result_zero_count_replaces_previous_usage_without_retaining_other_fields(self):
+        self.stdout = COMPLETED_TURN_JSONL + (
+            '{"type":"turn.completed","usage":{"output_tokens":0}}\n'
+        )
+        self.assertEqual(self.request_result()["usage"], {
+            "input_tokens": None, "output_tokens": 0, "reasoning_tokens": None,
+        })
+        self.assert_output_removed()
+
+    def test_result_missing_or_invalid_usage_is_nullable(self):
+        for stdout in ("", "not-json", '{"type":"turn.completed","usage":null}',
+                       '{"type":"turn.completed","usage":"invalid"}'):
+            with self.subTest(stdout=stdout):
+                self.stdout = stdout
+                self.assertEqual(self.request_result()["usage"], {
+                    "input_tokens": None, "output_tokens": None, "reasoning_tokens": None,
+                })
+
+    def test_result_rejects_invalid_token_counts_without_converting_them_to_zero(self):
+        for count in (-1, 1.5, True, "12", [], {}):
+            with self.subTest(count=count):
+                self.stdout = json.dumps({"type": "turn.completed", "usage": {
+                    "input_tokens": count, "output_tokens": count, "reasoning_tokens": count,
+                }})
+                self.assertEqual(self.request_result()["usage"], {
+                    "input_tokens": None, "output_tokens": None, "reasoning_tokens": None,
+                })
+
+    def test_result_rejects_missing_or_empty_final_file_even_with_valid_usage(self):
+        self.stdout = COMPLETED_TURN_JSONL
+        for missing, answer in ((True, "unused"), (False, " \n\t")):
+            with self.subTest(missing=missing):
+                self.missing_output, self.answer = missing, answer
+                with self.assertRaises(codex_runner.CodexExecutionError):
+                    self.request_result()
+                self.assert_output_removed()
+
+    def test_result_nonzero_exit_exposes_partial_answer_and_usage_as_typed_details(self):
+        self.returncode = 1
+        self.answer = "部分回答 api_key=answer-secret"
+        self.stdout = COMPLETED_TURN_JSONL + (
+            '{"type":"turn.failed","error":{"message":"上游失败"}}\n'
+        )
+
+        with self.assertRaises(codex_runner.CodexExecutionError) as raised:
+            self.request_result()
+
+        self.assertEqual(raised.exception.details.text, self.answer)
+        self.assertEqual(raised.exception.details.usage, {
+            "input_tokens": 184, "output_tokens": 37, "reasoning_tokens": 12,
+        })
+        self.assert_output_removed()
+
+    def test_result_empty_answer_exposes_available_usage_as_typed_details(self):
+        self.answer = " \n\t"
+        self.stdout = COMPLETED_TURN_JSONL
+
+        with self.assertRaises(codex_runner.CodexExecutionError) as raised:
+            self.request_result()
+
+        self.assertIsNone(raised.exception.details.text)
+        self.assertEqual(raised.exception.details.usage, {
+            "input_tokens": 184, "output_tokens": 37, "reasoning_tokens": 12,
+        })
+        self.assert_output_removed()
+
+    def test_result_failure_without_answer_or_usage_exposes_empty_typed_details(self):
+        self.returncode = 1
+        self.answer = " \n\t"
+        self.stdout = '{"type":"turn.failed","error":{"message":"上游失败"}}\n'
+
+        with self.assertRaises(codex_runner.CodexExecutionError) as raised:
+            self.request_result()
+
+        self.assertIsNone(raised.exception.details.text)
+        self.assertIsNone(raised.exception.details.usage)
+        self.assert_output_removed()
+
+    def test_result_timeout_terminates_process_tree_and_removes_output(self):
+        self.failure = subprocess.TimeoutExpired(cmd=["codex.exe"], timeout=600)
+
+        with self.assertRaisesRegex(codex_runner.CodexExecutionError, "600"):
+            self.request_result()
+        self.assertEqual(self.taskkill_calls[0][0], ["taskkill", "/PID", "4321", "/T", "/F"])
+        self.assertTrue(self.processes[0].killed)
+        self.assertTrue(self.processes[0].reaped)
+        self.assert_output_removed()
+
+    def test_result_timeout_preserves_partial_file_and_usage_from_str_or_bytes_output(self):
+        for captured in (COMPLETED_TURN_JSONL, COMPLETED_TURN_JSONL.encode("utf-8")):
+            with self.subTest(captured_type=type(captured).__name__):
+                self.failure = subprocess.TimeoutExpired(
+                    cmd=["codex.exe"], timeout=600, output=captured,
+                )
+                self.write_before_failure = True
+                self.answer = "超时前的部分回答"
+                # Process cleanup may return the same buffered stream again.
+                self.stdout = COMPLETED_TURN_JSONL
+
+                with self.assertRaisesRegex(codex_runner.CodexExecutionError, "600") as raised:
+                    self.request_result()
+
+                self.assertEqual(raised.exception.details.text, self.answer)
+                self.assertEqual(raised.exception.details.usage, {
+                    "input_tokens": 184, "output_tokens": 37, "reasoning_tokens": 12,
+                })
+                self.assertTrue(self.processes[-1].killed)
+                self.assertTrue(self.processes[-1].reaped)
+                self.assert_output_removed()
+
+    def test_result_timeout_uses_last_usage_from_exception_and_recovery_without_duplication(self):
+        first = '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3}}\n'
+        recovered = first + (
+            '{"type":"turn.completed","usage":{"input_tokens":20,"output_tokens":7}}\n'
+        )
+        self.failure = subprocess.TimeoutExpired(
+            cmd=["codex.exe"], timeout=600, output=first.encode("utf-8"),
+        )
+        self.stdout = recovered
+
+        with self.assertRaises(codex_runner.CodexExecutionError) as raised:
+            self.request_result()
+
+        self.assertEqual(raised.exception.details.usage, {
+            "input_tokens": 20, "output_tokens": 7, "reasoning_tokens": None,
+        })
+        self.assert_output_removed()
+
+    def test_result_communication_failure_preserves_partial_file_and_recovered_usage(self):
+        self.failure = OSError("original communication failure")
+        self.write_before_failure = True
+        self.answer = "通信失败前的部分回答"
+        self.stdout = COMPLETED_TURN_JSONL
+
+        with self.assertRaisesRegex(codex_runner.CodexExecutionError, "通信失败") as raised:
+            self.request_result()
+
+        self.assertEqual(raised.exception.details.text, self.answer)
+        self.assertEqual(raised.exception.details.usage, {
+            "input_tokens": 184, "output_tokens": 37, "reasoning_tokens": 12,
+        })
+        self.assertTrue(self.processes[0].killed)
+        self.assertTrue(self.processes[0].reaped)
+        self.assert_output_removed()
+
+    def test_result_timeout_without_partial_data_keeps_empty_details(self):
+        self.failure = subprocess.TimeoutExpired(cmd=["codex.exe"], timeout=600)
+
+        with self.assertRaises(codex_runner.CodexExecutionError) as raised:
+            self.request_result()
+
+        self.assertIsNone(raised.exception.details.text)
+        self.assertIsNone(raised.exception.details.usage)
+        self.assertTrue(self.processes[0].killed)
+        self.assertTrue(self.processes[0].reaped)
+        self.assert_output_removed()
+
+    def test_legacy_timeout_still_raises_compatible_execution_error_with_original_message(self):
+        self.failure = subprocess.TimeoutExpired(
+            cmd=["codex.exe"], timeout=120, output=COMPLETED_TURN_JSONL,
+        )
+        self.write_before_failure = True
+        self.answer = "旧接口部分回答"
+
+        with self.assertRaisesRegex(codex_runner.CodexExecutionError, "超过 120 秒，已终止"):
+            self.request()
+
+        self.assert_output_removed()
+
+    def test_result_keeps_safe_arguments_config_modes_and_custom_timeout(self):
+        for use_user_config in (False, True):
+            with self.subTest(use_user_config=use_user_config):
+                self.request_result(timeout=47, use_user_config=use_user_config)
+                process = self.processes[-1]
+                expected = [str(self.codex.resolve()), "exec", "--json"]
+                if not use_user_config:
+                    expected.append("--ignore-user-config")
+                expected.extend([
+                    "--model", "gpt-6-astra", "-c", 'model_reasoning_effort="low"',
+                    "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
+                    "--output-last-message", str(process.output_path), "-",
+                ])
+                self.assertEqual(process.args, expected)
+                self.assertIs(process.kwargs["shell"], False)
+                self.assertEqual(process.communications, [("challenge", 47)])
+                self.assert_output_removed()
+
+    def test_result_preserves_path_and_login_validation_before_exec(self):
+        request = getattr(codex_runner, "request_codex_completion_result", None)
+        self.assertTrue(callable(request), "structured Codex completion entry point is missing")
+        with self.assertRaises(codex_runner.CodexUnavailableError):
+            request(str(self.root / "missing/codex.exe"), "gpt-6-astra", "low", "challenge")
+        self.login_result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="Bearer secret", stderr="token=secret"
+        )
+        with self.assertRaises(codex_runner.CodexAuthenticationError) as raised:
+            self.request_result()
+        self.assertNotIn("secret", str(raised.exception))
+        self.popen.assert_not_called()
+
+    def test_result_sanitizes_structured_errors_and_cleans_output(self):
+        self.returncode = 1
+        self.stdout = '''\
+{"type":"thread.started","thread_id":"019abcde-1234-7000-8000-123456789abc"}
+{"type":"turn.started"}
+{"type":"error","message":"failed api_key=secret-key Bearer secret-bearer"}
+{"type":"turn.failed","error":{"message":"failed token=secret-token sk-secretvalue"}}
+'''
+        self.stderr = "startup warning secret"
+        with self.assertRaises(codex_runner.CodexExecutionError) as raised:
+            self.request_result()
+        self.assertIn("failed", str(raised.exception))
+        self.assertNotIn("secret", str(raised.exception))
+        self.assertNotIn("startup", str(raised.exception))
+        self.assert_output_removed()
+
+    def test_legacy_default_timeout_and_text_return_are_preserved_with_jsonl_usage(self):
+        self.stdout = COMPLETED_TURN_JSONL
+
+        result = codex_runner.request_codex_completion(
+            str(self.codex), "gpt-6-astra", "low", "legacy challenge"
+        )
+        self.assertEqual(result, "1, 2, 3")
+        self.assertEqual(self.processes[0].communications, [("legacy challenge", 120)])
         self.assert_output_removed()
 
 
