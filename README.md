@@ -4,6 +4,14 @@ ModelTrace 是一个本地运行的主动模型归因工具。它通过三条独
 
 ## 运行
 
+Windows 用户安装 Python 3.11 或更新版本后，双击根目录的 `start.bat` 即可启动。安装 Python 时请启用 Python Launcher，或勾选 **Add Python to PATH**。
+
+脚本只使用项目内的 `.venv`：不存在时自动创建，已有时直接使用。每次启动都在此环境中按 `requirements.txt` 安装或更新依赖，然后运行 `start.py` 并打开浏览器。本机 Python 仅用于首次创建环境；更新依赖不会升级 Python 解释器本身，获取依赖可能需要联网。
+
+运行期间请保留命令窗口，按 `Ctrl+C` 停止服务。依赖安装失败时不会启动应用，并会保留窗口显示错误；已有虚拟环境损坏或版本不符合要求时，请将 `.venv` 重命名备份后重新运行脚本。
+
+也可以手动安装依赖并启动：
+
 ```powershell
 python -m pip install -r requirements.txt
 python start.py
