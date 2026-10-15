@@ -82,11 +82,28 @@ class CodexRouteTests(unittest.TestCase):
             "text": ANSWER, "parsed_numbers": 80, "minimum_numbers": 80, "accepted": True,
         })
         completion.assert_called_once_with(
-            "C:/Codex/codex.exe", "gpt-5.4", "high", "Return 100 integers."
+            "C:/Codex/codex.exe", "gpt-5.4", "high", "Return 100 integers.",
+            use_user_config=False,
         )
 
+    def test_probe_forwards_explicit_user_config_mode(self):
+        for use_user_config in (False, True):
+            with self.subTest(use_user_config=use_user_config):
+                payload = {**self.payload, "use_user_config": use_user_config}
+                with patch(
+                    "codex_routes.request_codex_completion", return_value=ANSWER
+                ) as completion:
+                    response = self.client.post("/api/test/codex/probe", json=payload)
+                self.assertEqual(response.status_code, 200)
+                completion.assert_called_once_with(
+                    "C:/Codex/codex.exe", "gpt-5.4", "high",
+                    "Return 100 integers.", use_user_config=use_user_config,
+                )
+
     def assert_invalid_payload(self, payload):
-        with patch("codex_routes.request_codex_completion") as completion:
+        with patch(
+            "codex_routes.request_codex_completion", return_value=ANSWER
+        ) as completion:
             response = self.client.post("/api/test/codex/probe", json=payload)
         self.assertEqual(response.status_code, 400)
         self.assertTrue(response.get_json()["error"])
@@ -107,6 +124,7 @@ class CodexRouteTests(unittest.TestCase):
             "expected_count": [None, 0, -1, True, 1.5, "100"],
             "reasoning_effort": [None, "", 5],
             "codex_path": [5, []],
+            "use_user_config": [None, "true", "false", 0, 1, [], {}],
         }.items():
             for value in values:
                 with self.subTest(field=field, value=value):
@@ -128,7 +146,10 @@ class CodexRouteTests(unittest.TestCase):
                 with patch("codex_routes.request_codex_completion", return_value=ANSWER) as completion:
                     response = self.client.post("/api/test/codex/probe", json=payload)
                 self.assertEqual(response.status_code, 200)
-                completion.assert_called_once_with("", "gpt-5.4", effort, "Return 100 integers.")
+                completion.assert_called_once_with(
+                    "", "gpt-5.4", effort, "Return 100 integers.",
+                    use_user_config=False,
+                )
 
     def test_probe_maps_unavailable_and_authentication_errors_to_503(self):
         for error in [CodexUnavailableError("未找到 codex.exe"), CodexAuthenticationError("Codex 未登录")]:

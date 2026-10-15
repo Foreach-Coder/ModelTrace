@@ -15,6 +15,8 @@ class TestPageTests(unittest.TestCase):
         self.assertIn('id="codex-path"', html)
         self.assertIn('value="gpt-6-astra"', html)
         self.assertIn('<option value="low" selected>', html)
+        self.assertIn('<input id="codex-use-user-config" type="checkbox">', html)
+        self.assertIn('读取 Codex 用户配置（兼容 Codex++）', html)
 
     def test_model_test_page_loads_the_automatic_test_module(self):
         html = app.test_client().get("/").get_data(as_text=True)
@@ -30,7 +32,7 @@ import assert from 'node:assert/strict';
 const elements = new Map();
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
-    id, value: '', _disabled: false, style: {}, dataset: {}, handlers: {},
+    id, value: '', checked: false, _disabled: false, style: {}, dataset: {}, handlers: {},
     get disabled() { return this._disabled; },
     set disabled(value) { this._disabled = Boolean(value); },
     classList: { toggle() {} },
@@ -41,11 +43,14 @@ function element(id) {
       }
       return id.startsWith('codex-') ? element('codex-test-form') : null;
     },
+    scrollIntoView() {},
   });
   return elements.get(id);
 }
-const controls = ['codex-path', 'codex-model', 'codex-reasoning-effort',
+const controls = ['codex-path', 'codex-model', 'codex-reasoning-effort', 'codex-use-user-config',
   'codex-detect', 'codex-submit', 'api-submit'].map(element);
+const codexTab = element('codex-mode-tab');
+codexTab.dataset.testMode = 'codex';
 const saved = new Map();
 globalThis.window = {
   DEFAULT_BANK_ID: 'bank', BANK_SUMMARIES: {bank: {label: 'Test', models: []}},
@@ -54,7 +59,8 @@ globalThis.window = {
 };
 globalThis.document = {
   getElementById: element,
-  querySelectorAll: selector => selector.startsWith('#api-test-form') ? controls : [],
+  querySelectorAll: selector => selector === '[data-test-mode]' ? [codexTab]
+    : selector.startsWith('#api-test-form') ? controls : [],
 };
 const statusRequests = [];
 let challengeRequests = 0;
@@ -89,7 +95,7 @@ import assert from 'node:assert/strict';
 const elements = new Map();
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
-    id, value: '', hidden: true, textContent: '', innerHTML: '', className: '',
+    id, value: '', checked: false, hidden: true, textContent: '', innerHTML: '', className: '',
     _disabled: false, style: {}, dataset: {}, handlers: {},
     get disabled() { return this._disabled; },
     set disabled(value) { this._disabled = Boolean(value); },
@@ -100,7 +106,7 @@ function element(id) {
   });
   return elements.get(id);
 }
-const controls = ['codex-path', 'codex-model', 'codex-reasoning-effort',
+const controls = ['codex-path', 'codex-model', 'codex-reasoning-effort', 'codex-use-user-config',
   'codex-detect', 'codex-submit', 'api-submit'].map(element);
 globalThis.window = {
   DEFAULT_BANK_ID: 'bank', BANK_SUMMARIES: {bank: {label: 'Test', models: []}},
@@ -161,7 +167,7 @@ await detection;
 assert.equal(path.value, 'C:\\desktop\\codex.exe');
 assert.match(element('codex-runtime-status').textContent, /test-version/);
 assert.deepEqual(JSON.parse(saved.get('modeltrace.codex-test.preferences')),
-  {manualPath: '', model: 'gpt-6-astra', reasoningEffort: 'low'});
+  {manualPath: '', model: 'gpt-6-astra', reasoningEffort: 'low', useUserConfig: false});
 assert.equal(detect.disabled, false);
 """)
 
@@ -197,7 +203,7 @@ assert.equal(JSON.parse(saved.get('modeltrace.codex-test.preferences')).manualPa
   'C:\\manual\\codex.exe', 'fixture must first save a successful manual override');
 const detection = detect.handlers.click();
 assert.deepEqual(JSON.parse(saved.get('modeltrace.codex-test.preferences')),
-  {manualPath: '', model: 'gpt-6-astra', reasoningEffort: 'low'},
+  {manualPath: '', model: 'gpt-6-astra', reasoningEffort: 'low', useUserConfig: false},
   'choosing automatic detection must clear the saved manual path before the response');
 assert.deepEqual(statusRequests.at(-1), {codex_path: ''});
 resolveStatus({ok: true, json: async () => failedStatus});
@@ -211,6 +217,53 @@ assert.deepEqual(statusRequests.at(-1), {codex_path: ''},
 resolveStatus({ok: true, json: async () => failedStatus});
 await submission;
 assert.equal(challengeRequests, 1, 'failed preflight must not launch a model probe');
+""")
+
+    def test_codex_user_config_preference_is_restored_submitted_and_preserved(self):
+        self.run_ui_scenario(r"""
+saved.set('modeltrace.codex-test.preferences', JSON.stringify({
+  manualPath: '', model: 'gpt-6-astra', reasoningEffort: 'low', useUserConfig: true,
+}));
+const probePayloads = [];
+const challenges = Array.from({length: 3}, (_, index) => ({
+  prompt: `prompt-${index + 1}`, expected_count: 100 + index,
+}));
+globalThis.fetch = async (url, options) => {
+  if (url === '/api/codex/status') {
+    return {ok: true, json: async () => ({available: true, authenticated: true,
+      path: 'C:\\desktop\\codex.exe', source: 'desktop', version: 'test-version', error: ''})};
+  }
+  if (url === '/api/challenges') {
+    return {ok: true, json: async () => ({challenges})};
+  }
+  if (url === '/api/test/codex/probe') {
+    probePayloads.push(JSON.parse(options.body));
+    return {ok: true, json: async () => ({accepted: true, text: 'valid',
+      parsed_numbers: 80, minimum_numbers: 80})};
+  }
+  if (url === '/api/analyze') {
+    return {ok: true, json: async () => ({
+      diagnostics: [], results: [{display_name: 'Model', family_name: 'Family',
+        probability: 1, profile_similarity: 1}], prediction_name: 'Model',
+      probability: 1, family_prediction_name: 'Family', family_probability: 1,
+      used_outputs: 3,
+    })};
+  }
+  throw new Error(`Unexpected URL: ${url}`);
+};
+codexTab.handlers.click();
+assert.equal(element('codex-use-user-config').checked, true,
+  'stored preference must restore the checkbox');
+await new Promise(resolve => setImmediate(resolve));
+await element('codex-test-form').handlers.submit({preventDefault() {}});
+assert.equal(probePayloads.length, 3);
+for (const payload of probePayloads) {
+  assert.equal(payload.use_user_config, true,
+    'the checked preference must be sent to every Codex probe');
+}
+assert.deepEqual(JSON.parse(saved.get('modeltrace.codex-test.preferences')), {
+  manualPath: '', model: 'gpt-6-astra', reasoningEffort: 'low', useUserConfig: true,
+});
 """)
 
     def test_mixed_automatic_failures_keep_escaped_attempt_summaries(self):

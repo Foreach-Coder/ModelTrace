@@ -106,6 +106,8 @@ label code { color: var(--primary-dark); }
 .codex-path-row { display: flex; gap: 10px; }
 .codex-path-row input { min-width: 0; flex: 1; }
 .codex-path-row button { flex: 0 0 auto; }
+.codex-config-toggle { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 8px; }
+.codex-config-toggle input { width: 16px; height: 16px; padding: 0; flex: 0 0 auto; }
 #codex-runtime-status { margin-top: 0; overflow-wrap: anywhere; }
 .form-footer { justify-content: flex-end; padding: 12px 17px; border-top: 1px solid var(--line); }
 

@@ -9,6 +9,9 @@ function normalizedPreferences(preferences = {}) {
     reasoningEffort: REASONING_EFFORTS.has(preferences?.reasoningEffort)
       ? preferences.reasoningEffort
       : "low",
+    useUserConfig: typeof preferences?.useUserConfig === "boolean"
+      ? preferences.useUserConfig
+      : false,
   };
 }
 

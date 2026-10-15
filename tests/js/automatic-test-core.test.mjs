@@ -115,18 +115,21 @@ test("Codex preferences default safely when storage is empty or malformed", () =
     manualPath: "",
     model: "gpt-6-astra",
     reasoningEffort: "low",
+    useUserConfig: false,
   });
   const malformedStorage = { getItem: () => "not-json" };
   assert.deepEqual(readCodexPreferences(malformedStorage), {
     manualPath: "",
     model: "gpt-6-astra",
     reasoningEffort: "low",
+    useUserConfig: false,
   });
-  const wrongTypedStorage = { getItem: () => JSON.stringify({ manualPath: "C:\\Codex", model: 12, reasoningEffort: "ultra" }) };
+  const wrongTypedStorage = { getItem: () => JSON.stringify({ manualPath: "C:\\Codex", model: 12, reasoningEffort: "ultra", useUserConfig: "true" }) };
   assert.deepEqual(readCodexPreferences(wrongTypedStorage), {
     manualPath: "C:\\Codex",
     model: "gpt-6-astra",
     reasoningEffort: "low",
+    useUserConfig: false,
   });
 });
 
@@ -137,6 +140,7 @@ test("Codex preferences persist only the manual override supplied by the UI", ()
     manualPath: "",
     model: "gpt-6-astra",
     reasoningEffort: "medium",
+    useUserConfig: true,
     authenticated: true,
     pathSource: "desktop",
   });
@@ -145,5 +149,6 @@ test("Codex preferences persist only the manual override supplied by the UI", ()
     manualPath: "",
     model: "gpt-6-astra",
     reasoningEffort: "medium",
+    useUserConfig: true,
   });
 });

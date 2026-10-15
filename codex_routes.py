@@ -46,6 +46,7 @@ def codex_probe():
         prompt = payload.get("prompt")
         expected_count = payload.get("expected_count")
         reasoning_effort = payload.get("reasoning_effort")
+        use_user_config = payload.get("use_user_config", False)
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model 必须是非空字符串")
         if not isinstance(prompt, str) or not prompt.strip():
@@ -54,7 +55,12 @@ def codex_probe():
             raise ValueError("expected_count 必须是正整数")
         if reasoning_effort not in ("low", "medium", "high", "xhigh"):
             raise ValueError("reasoning_effort 仅支持 low、medium、high、xhigh")
-        text = request_codex_completion(codex_path, model, reasoning_effort, prompt)
+        if type(use_user_config) is not bool:
+            raise ValueError("use_user_config 必须是布尔值")
+        text = request_codex_completion(
+            codex_path, model, reasoning_effort, prompt,
+            use_user_config=use_user_config,
+        )
         return jsonify(evaluate_probe(text, expected_count))
     except ValueError as error:
         return jsonify({"error": str(error)}), 400

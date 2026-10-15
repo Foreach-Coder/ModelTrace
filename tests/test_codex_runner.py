@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import tempfile
@@ -199,11 +200,12 @@ class CodexDiscoveryTests(RuntimeFixtures):
 class FakeCodexProcess:
     """Process boundary double; output files and adapter cleanup stay real."""
 
-    def __init__(self, args, kwargs, *, answer, returncode, stderr, failure, missing_output):
+    def __init__(self, args, kwargs, *, answer, returncode, stdout, stderr, failure, missing_output):
         self.args = args
         self.kwargs = kwargs
         self.answer = answer
         self.returncode = returncode
+        self.stdout = stdout
         self.stderr = stderr
         self.failure = failure
         self.missing_output = missing_output
@@ -223,7 +225,7 @@ class FakeCodexProcess:
             self.output_path.unlink()
         else:
             self.output_path.write_text(self.answer, encoding="utf-8")
-        return ("internal process log", self.stderr)
+        return (self.stdout, self.stderr)
 
     def kill(self):
         self.killed = True
@@ -318,6 +320,7 @@ class CodexExecutionTests(RuntimeFixtures):
         self.processes = []
         self.answer = "1, 2, 3\n"
         self.returncode = 0
+        self.stdout = ""
         self.stderr = ""
         self.failure = None
         self.start_failure = None
@@ -343,14 +346,16 @@ class CodexExecutionTests(RuntimeFixtures):
             raise self.start_failure
         process = FakeCodexProcess(
             args, kwargs, answer=self.answer, returncode=self.returncode,
-            stderr=self.stderr, failure=self.failure, missing_output=self.missing_output,
+            stdout=self.stdout, stderr=self.stderr, failure=self.failure,
+            missing_output=self.missing_output,
         )
         self.processes.append(process)
         return process
 
-    def request(self, model="gpt-6-astra", effort="low", timeout=120):
+    def request(self, model="gpt-6-astra", effort="low", timeout=120, use_user_config=False):
         return codex_runner.request_codex_completion(
-            str(self.codex), model, effort, "challenge", timeout=timeout
+            str(self.codex), model, effort, "challenge", timeout=timeout,
+            use_user_config=use_user_config,
         )
 
     def assert_output_removed(self):
@@ -363,7 +368,7 @@ class CodexExecutionTests(RuntimeFixtures):
         process = self.processes[0]
 
         self.assertEqual(process.args, [
-            str(self.codex.resolve()), "exec", "--ignore-user-config",
+            str(self.codex.resolve()), "exec", "--json", "--ignore-user-config",
             "--model", "gpt-6-astra", "-c", 'model_reasoning_effort="low"',
             "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
             "--output-last-message", str(process.output_path), "-",
@@ -374,6 +379,21 @@ class CodexExecutionTests(RuntimeFixtures):
             "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
         })
         self.assertEqual(process.communications, [("challenge", 120)])
+
+    def test_exec_user_config_mode_omits_only_ignore_user_config(self):
+        self.request(use_user_config=False)
+        self.request(use_user_config=True)
+        isolated_args = self.processes[0].args
+        user_config_args = self.processes[1].args
+
+        self.assertEqual(isolated_args.count("--ignore-user-config"), 1)
+        self.assertNotIn("--ignore-user-config", user_config_args)
+        isolated_args = isolated_args.copy()
+        user_config_args = user_config_args.copy()
+        isolated_args[isolated_args.index("--output-last-message") + 1] = "<output>"
+        user_config_args[user_config_args.index("--output-last-message") + 1] = "<output>"
+        isolated_args.remove("--ignore-user-config")
+        self.assertEqual(isolated_args, user_config_args)
 
     def test_exec_reads_and_returns_output_last_message(self):
         self.assertEqual(self.request(), "1, 2, 3")
@@ -403,13 +423,36 @@ class CodexExecutionTests(RuntimeFixtures):
 
     def test_exec_maps_nonzero_exit_to_sanitized_execution_error(self):
         self.returncode = 1
-        self.stderr = "x" * 300 + "y" * 200
+        self.stderr = "initial startup warning " + "x" * 1500 + " actual final error"
 
         with self.assertRaises(codex_runner.CodexExecutionError) as raised:
             self.request()
-        self.assertLessEqual(len(str(raised.exception)), 350)
-        self.assertIn("x", str(raised.exception))
-        self.assertNotIn("y", str(raised.exception))
+        message = str(raised.exception)
+        self.assertLessEqual(len(message), 1050)
+        self.assertIn("actual final error", message)
+        self.assertNotIn("initial startup warning", message)
+        self.assert_output_removed()
+
+    def test_exec_prefers_actual_structured_error_over_startup_warnings(self):
+        self.returncode = 1
+        wrapped_error = json.dumps(
+            'tools.12: tool type "tool_search" is not supported'
+        )
+        self.stdout = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "thread-123"}),
+            json.dumps({"type": "error", "message": wrapped_error}),
+            json.dumps({
+                "type": "turn.failed",
+                "error": {"message": wrapped_error},
+            }),
+        ])
+        self.stderr = "plugin catalog warning"
+
+        with self.assertRaises(codex_runner.CodexExecutionError) as raised:
+            self.request()
+        message = str(raised.exception)
+        self.assertIn('tools.12: tool type "tool_search" is not supported', message)
+        self.assertNotIn("plugin catalog warning", message)
         self.assert_output_removed()
 
     def test_exec_timeout_terminates_process_tree_and_removes_temporary_output(self):
@@ -439,10 +482,16 @@ class CodexExecutionTests(RuntimeFixtures):
 
     def test_exec_redacts_credentials_and_control_sequences_in_diagnostics(self):
         self.returncode = 1
-        self.stderr = (
-            '\x1b[31mfailed\x1b[0m\napi_key=secret-key Bearer secret-bearer '
-            'token="secret-token" sk-secretvalue'
+        self.stdout = json.dumps(
+            {
+                "type": "error",
+                "message": (
+                    '\x1b[31mfailed\x1b[0m\napi_key=secret-key Bearer secret-bearer '
+                    'token="secret-token" sk-secretvalue'
+                ),
+            }
         )
+        self.stderr = "startup warning"
 
         with self.assertRaises(codex_runner.CodexExecutionError) as raised:
             self.request()
@@ -486,8 +535,14 @@ class CodexExecutionTests(RuntimeFixtures):
             with self.subTest(effort=effort):
                 self.assertEqual(self.request(model="provider/model:v1.2_test-3", effort=effort, timeout=17), "1, 2, 3")
                 process = self.processes[-1]
-                self.assertEqual(process.args[4], "provider/model:v1.2_test-3")
-                self.assertEqual(process.args[6], f'model_reasoning_effort="{effort}"')
+                self.assertEqual(
+                    process.args[process.args.index("--model") + 1],
+                    "provider/model:v1.2_test-3",
+                )
+                self.assertEqual(
+                    process.args[process.args.index("-c") + 1],
+                    f'model_reasoning_effort="{effort}"',
+                )
                 self.assertEqual(process.communications, [("challenge", 17)])
                 self.assert_output_removed()
 

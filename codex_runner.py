@@ -1,5 +1,6 @@
 """Discover and run the Windows Codex CLI with fixed, isolated arguments."""
 
+import json
 import os
 import re
 import shutil
@@ -161,7 +162,55 @@ def _sanitized_diagnostic(text: str) -> str:
     )
     text = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[已隐藏]", text)
     text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
-    return " ".join(text.split())[:300]
+    return " ".join(text.split())[-1000:]
+
+
+def _unwrap_error_message(value: object) -> str:
+    json_layers = 0
+    while True:
+        if isinstance(value, dict):
+            error = value.get("error")
+            if isinstance(error, dict) and "message" in error:
+                value = error["message"]
+                continue
+            if "message" in value:
+                value = value["message"]
+                continue
+            return ""
+        if not isinstance(value, str):
+            return ""
+        value = value.strip()
+        if not value or json_layers == 2:
+            return value
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+        if not isinstance(decoded, (str, dict)):
+            return value
+        value = decoded
+        json_layers += 1
+
+
+def _structured_error(stdout: str) -> str:
+    diagnostic = ""
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "error":
+            value = event.get("message")
+        elif event.get("type") == "turn.failed":
+            value = event.get("error")
+        else:
+            continue
+        message = _unwrap_error_message(value)
+        if message:
+            diagnostic = message
+    return diagnostic
 
 
 def _terminate_process_tree(process: subprocess.Popen) -> None:
@@ -183,7 +232,8 @@ def _terminate_process_tree(process: subprocess.Popen) -> None:
 
 
 def request_codex_completion(
-    codex_path: str, model: str, reasoning_effort: str, prompt: str, timeout: int = 120
+    codex_path: str, model: str, reasoning_effort: str, prompt: str,
+    timeout: int = 120, use_user_config: bool = False,
 ) -> str:
     """Execute one authenticated, ephemeral, read-only Codex challenge."""
     if not isinstance(model, str) or re.fullmatch(r"[A-Za-z0-9._/:-]{1,128}", model) is None:
@@ -197,10 +247,10 @@ def request_codex_completion(
     try:
         with tempfile.NamedTemporaryFile(prefix="modeltrace-codex-", suffix=".txt", delete=False) as output:
             output_path = Path(output.name)
-        args = [
-            runtime.path,
-            "exec",
-            "--ignore-user-config",
+        args = [runtime.path, "exec", "--json"]
+        if not use_user_config:
+            args.append("--ignore-user-config")
+        args.extend([
             "--model", model,
             "-c", f'model_reasoning_effort="{reasoning_effort}"',
             "--ephemeral",
@@ -208,14 +258,14 @@ def request_codex_completion(
             "--skip-git-repo-check",
             "--output-last-message", str(output_path),
             "-",
-        ]
+        ])
         process = subprocess.Popen(
             args, shell=False, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8",
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         try:
-            _, stderr = process.communicate(input=prompt, timeout=timeout)
+            stdout, stderr = process.communicate(input=prompt, timeout=timeout)
         except subprocess.TimeoutExpired as error:
             _terminate_process_tree(process)
             raise CodexExecutionError(f"Codex 执行超过 {timeout} 秒，已终止") from error
@@ -223,7 +273,8 @@ def request_codex_completion(
             _terminate_process_tree(process)
             raise CodexExecutionError("Codex 执行通信失败") from error
         if process.returncode != 0:
-            diagnostic = _sanitized_diagnostic(stderr)
+            raw_diagnostic = _structured_error(stdout) or stderr
+            diagnostic = _sanitized_diagnostic(raw_diagnostic)
             raise CodexExecutionError("Codex 执行失败" + (f"：{diagnostic}" if diagnostic else ""))
         answer = output_path.read_text(encoding="utf-8").strip()
         if not answer:

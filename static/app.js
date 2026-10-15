@@ -189,6 +189,7 @@ function saveCodexPreferences() {
       manualPath: codexManualPath ? byId("codex-path").value.trim() : "",
       model: byId("codex-model").value.trim(),
       reasoningEffort: byId("codex-reasoning-effort").value,
+      useUserConfig: byId("codex-use-user-config").checked,
     });
   } catch {
     // The test remains usable when browser storage is unavailable.
@@ -242,6 +243,7 @@ function initializeCodex() {
   byId("codex-path").value = preferences.manualPath;
   byId("codex-model").value = preferences.model;
   byId("codex-reasoning-effort").value = preferences.reasoningEffort;
+  byId("codex-use-user-config").checked = preferences.useUserConfig;
   codexManualPath = Boolean(preferences.manualPath);
   return detectCodex(preferences.manualPath, codexManualPath);
 }
@@ -407,6 +409,7 @@ byId("codex-test-form").addEventListener("submit", (event) => testAutomatically(
   configuration: () => ({
     codex_path: byId("codex-path").value.trim(), model: byId("codex-model").value.trim(),
     reasoning_effort: byId("codex-reasoning-effort").value,
+    use_user_config: byId("codex-use-user-config").checked,
   }),
   onSuccess: saveCodexPreferences,
 }));
