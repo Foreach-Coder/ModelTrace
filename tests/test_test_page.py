@@ -17,6 +17,13 @@ class TestPageTests(unittest.TestCase):
         self.assertIn('<option value="low" selected>', html)
         self.assertIn('<input id="codex-use-user-config" type="checkbox">', html)
         self.assertIn('读取 Codex 用户配置（兼容 Codex++）', html)
+        self.assertNotIn('list="codex-model-options"', html)
+        self.assertNotIn('id="codex-model-options"', html)
+        self.assertIn('id="codex-model-toggle"', html)
+        self.assertIn('aria-label="展开模型列表"', html)
+        self.assertIn('id="codex-model-menu"', html)
+        self.assertIn('id="codex-model-refresh"', html)
+        self.assertIn('aria-label="刷新模型列表"', html)
 
     def test_model_test_page_loads_the_automatic_test_module(self):
         html = app.test_client().get("/").get_data(as_text=True)
@@ -32,14 +39,15 @@ import assert from 'node:assert/strict';
 const elements = new Map();
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
-    id, value: '', checked: false, _disabled: false, style: {}, dataset: {}, handlers: {},
+    id, value: '', checked: false, hidden: false, textContent: '', innerHTML: '',
+    _disabled: false, style: {}, dataset: {}, handlers: {},
     get disabled() { return this._disabled; },
     set disabled(value) { this._disabled = Boolean(value); },
     classList: { toggle() {} },
     addEventListener(type, handler) { this.handlers[type] = handler; },
     closest(selector) {
       if (selector === '#codex-test-form button') {
-        return id === 'codex-detect' || id === 'codex-submit' ? this : null;
+        return ['codex-detect', 'codex-model-toggle', 'codex-model-refresh', 'codex-submit'].includes(id) ? this : null;
       }
       return id.startsWith('codex-') ? element('codex-test-form') : null;
     },
@@ -48,7 +56,8 @@ function element(id) {
   return elements.get(id);
 }
 const controls = ['codex-path', 'codex-model', 'codex-reasoning-effort', 'codex-use-user-config',
-  'codex-detect', 'codex-submit', 'api-submit'].map(element);
+  'codex-detect', 'codex-model-toggle', 'codex-model-refresh', 'codex-submit', 'api-submit'].map(element);
+element('codex-model-menu').hidden = true;
 const codexTab = element('codex-mode-tab');
 codexTab.dataset.testMode = 'codex';
 const saved = new Map();
@@ -63,12 +72,20 @@ globalThis.document = {
     : selector.startsWith('#api-test-form') ? controls : [],
 };
 const statusRequests = [];
+const modelRequests = [];
 let challengeRequests = 0;
 let resolveStatus;
 globalThis.fetch = async (url, options) => {
   if (url === '/api/challenges') {
     challengeRequests += 1;
     return {ok: true, json: async () => ({challenges: []})};
+  }
+  if (url === '/api/codex/models') {
+    modelRequests.push(JSON.parse(options.body));
+    return {ok: true, json: async () => ({models: [
+      {id: 'gpt-6-astra', label: 'GPT-6 Astra'},
+      {id: 'deepseek-flash', label: 'DeepSeek Flash'},
+    ]})};
   }
   assert.equal(url, '/api/codex/status');
   statusRequests.push(JSON.parse(options.body));
@@ -107,7 +124,7 @@ function element(id) {
   return elements.get(id);
 }
 const controls = ['codex-path', 'codex-model', 'codex-reasoning-effort', 'codex-use-user-config',
-  'codex-detect', 'codex-submit', 'api-submit'].map(element);
+  'codex-detect', 'codex-model-toggle', 'codex-model-refresh', 'codex-submit', 'api-submit'].map(element);
 globalThis.window = {
   DEFAULT_BANK_ID: 'bank', BANK_SUMMARIES: {bank: {label: 'Test', models: []}},
   localStorage: {getItem: () => null, setItem() {}},
@@ -233,6 +250,11 @@ globalThis.fetch = async (url, options) => {
     return {ok: true, json: async () => ({available: true, authenticated: true,
       path: 'C:\\desktop\\codex.exe', source: 'desktop', version: 'test-version', error: ''})};
   }
+  if (url === '/api/codex/models') {
+    return {ok: true, json: async () => ({models: [
+      {id: 'deepseek-flash', label: 'DeepSeek Flash'},
+    ]})};
+  }
   if (url === '/api/challenges') {
     return {ok: true, json: async () => ({challenges})};
   }
@@ -264,6 +286,58 @@ for (const payload of probePayloads) {
 assert.deepEqual(JSON.parse(saved.get('modeltrace.codex-test.preferences')), {
   manualPath: '', model: 'gpt-6-astra', reasoningEffort: 'low', useUserConfig: true,
 });
+""")
+
+    def test_codex_model_catalog_loads_refreshes_and_keeps_free_input(self):
+        self.run_ui_scenario(r"""
+globalThis.fetch = async (url, options) => {
+  if (url === '/api/codex/status') {
+    return {ok: true, json: async () => ({available: true, authenticated: true,
+      path: 'C:\\desktop\\codex.exe', source: 'desktop', version: 'test-version', error: ''})};
+  }
+  if (url === '/api/codex/models') {
+    modelRequests.push(JSON.parse(options.body));
+    const custom = JSON.parse(options.body).use_user_config;
+    return {ok: true, json: async () => ({models: custom
+      ? [{id: 'deepseek-flash', label: 'DeepSeek Flash'}]
+      : [{id: 'gpt-6-astra', label: 'GPT-6 Astra'}]})};
+  }
+  if (url === '/api/challenges') {
+    return {ok: true, json: async () => ({challenges: []})};
+  }
+  throw new Error(`Unexpected URL: ${url}`);
+};
+codexTab.handlers.click();
+await new Promise(resolve => setImmediate(resolve));
+assert.deepEqual(modelRequests, [{codex_path: 'C:\\desktop\\codex.exe', use_user_config: false}]);
+assert.match(element('codex-model-menu').innerHTML, /data-model-id="gpt-6-astra"/);
+
+const model = element('codex-model');
+model.value = 'vendor/manual-model';
+const toggle = element('codex-use-user-config');
+toggle.checked = true;
+await toggle.handlers.change();
+assert.equal(model.value, 'vendor/manual-model', 'catalog refresh must preserve arbitrary input');
+assert.deepEqual(modelRequests.at(-1), {
+  codex_path: 'C:\\desktop\\codex.exe', use_user_config: true,
+});
+const menu = element('codex-model-menu');
+assert.match(menu.innerHTML, /data-model-id="deepseek-flash"/);
+
+model.value = 'gpt';
+if (model.handlers.input) model.handlers.input({target: model});
+await element('codex-model-toggle').handlers.click();
+assert.equal(menu.hidden, false);
+assert.match(menu.innerHTML, /data-model-id="deepseek-flash"/,
+  'typing must not filter the complete model list');
+menu.handlers.click({target: {closest: () => ({dataset: {modelId: 'deepseek-flash'}})}});
+assert.equal(model.value, 'deepseek-flash');
+assert.equal(menu.hidden, true);
+
+model.value = 'vendor/manual-model';
+await element('codex-model-refresh').handlers.click();
+assert.equal(modelRequests.length, 3, 'the in-field refresh button must reload the catalog');
+assert.equal(model.value, 'vendor/manual-model');
 """)
 
     def test_mixed_automatic_failures_keep_escaped_attempt_summaries(self):

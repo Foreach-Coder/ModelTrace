@@ -8,6 +8,7 @@ from codex_runner import (
     CodexExecutionError,
     CodexUnavailableError,
     get_codex_status,
+    list_codex_models,
     request_codex_completion,
 )
 
@@ -33,6 +34,29 @@ def codex_status():
         return jsonify(get_codex_status(_codex_path(payload)))
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
+
+
+@codex_blueprint.post("/api/codex/models")
+def codex_models():
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        use_user_config = payload.get("use_user_config", False)
+        if type(use_user_config) is not bool:
+            raise ValueError("use_user_config 必须是布尔值")
+        models = list_codex_models(
+            _codex_path(payload), use_user_config=use_user_config,
+        )
+        return jsonify({"models": models})
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except CodexUnavailableError as error:
+        return jsonify({"error": str(error)}), 503
+    except CodexExecutionError as error:
+        return jsonify({"error": str(error)}), 502
 
 
 @codex_blueprint.post("/api/test/codex/probe")

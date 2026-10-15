@@ -153,6 +153,54 @@ def get_codex_status(explicit_path: str = "") -> dict[str, object]:
     return status
 
 
+def list_codex_models(
+    explicit_path: str = "", use_user_config: bool = False,
+) -> list[dict[str, str]]:
+    """Return picker-visible models from Codex without limiting manual input."""
+    runtime = discover_codex(explicit_path)
+    args = [runtime.path, "debug", "models"]
+    if not use_user_config:
+        args.append("--bundled")
+    try:
+        result = subprocess.run(
+            args, shell=False, capture_output=True, text=True,
+            encoding="utf-8", timeout=20,
+        )
+    except (OSError, UnicodeError, subprocess.SubprocessError) as error:
+        raise CodexExecutionError("无法读取 Codex 模型目录") from error
+    if result.returncode != 0:
+        diagnostic = _sanitized_diagnostic(result.stderr or result.stdout)
+        raise CodexExecutionError(
+            "Codex 模型目录请求失败" + (f"：{diagnostic}" if diagnostic else "")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise CodexExecutionError("Codex 模型目录格式无效") from error
+    entries = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise CodexExecutionError("Codex 模型目录格式无效")
+
+    models = []
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("visibility", "list") != "list":
+            continue
+        model_id = entry.get("slug") or entry.get("model") or entry.get("id")
+        if (
+            not isinstance(model_id, str)
+            or re.fullmatch(r"[A-Za-z0-9._/:-]{1,128}", model_id) is None
+            or model_id in seen
+        ):
+            continue
+        label = entry.get("display_name") or entry.get("displayName") or model_id
+        if not isinstance(label, str) or not label.strip():
+            label = model_id
+        seen.add(model_id)
+        models.append({"id": model_id, "label": label.strip()})
+    return models
+
+
 def _sanitized_diagnostic(text: str) -> str:
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
     text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [已隐藏]", text)

@@ -90,6 +90,7 @@ class CodexDiscoveryTests(RuntimeFixtures):
             codex_runner.discover_codex(), installed, "install", "0.138.0"
         )
 
+
     def test_invalid_explicit_path_does_not_fall_back(self):
         missing = self.root / "missing/codex.exe"
         self.executable("OpenAI/Codex/bin/new/codex.exe")
@@ -195,6 +196,58 @@ class CodexDiscoveryTests(RuntimeFixtures):
     def test_no_candidates_reports_unavailable(self):
         with self.assertRaisesRegex(codex_runner.CodexUnavailableError, "codex.exe"):
             codex_runner.discover_codex()
+
+
+class CodexModelCatalogTests(RuntimeFixtures):
+    def setUp(self):
+        super().setUp()
+        self.codex = self.executable("manual/codex.exe")
+        self.catalog = {
+            "models": [
+                {
+                    "slug": "deepseek-flash", "display_name": "DeepSeek Flash",
+                    "visibility": "list",
+                },
+                {
+                    "slug": "k3", "display_name": "K3", "visibility": "list",
+                },
+                {
+                    "slug": "hidden-model", "display_name": "Hidden",
+                    "visibility": "hide",
+                },
+            ]
+        }
+
+    def run_process(self, args, **kwargs):
+        if args[1:3] == ["debug", "models"]:
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=json.dumps(self.catalog), stderr=""
+            )
+        return super().run_process(args, **kwargs)
+
+    def test_user_config_catalog_returns_visible_custom_models(self):
+        models = codex_runner.list_codex_models(str(self.codex), use_user_config=True)
+
+        self.assertEqual(models, [
+            {"id": "deepseek-flash", "label": "DeepSeek Flash"},
+            {"id": "k3", "label": "K3"},
+        ])
+        self.assertEqual(self.run.call_args_list[-1].args[0], [
+            str(self.codex.resolve()), "debug", "models",
+        ])
+
+    def test_isolated_catalog_uses_bundled_models(self):
+        codex_runner.list_codex_models(str(self.codex), use_user_config=False)
+
+        self.assertEqual(self.run.call_args_list[-1].args[0], [
+            str(self.codex.resolve()), "debug", "models", "--bundled",
+        ])
+
+    def test_catalog_rejects_malformed_output(self):
+        self.catalog = "not-a-model-catalog"
+
+        with self.assertRaisesRegex(codex_runner.CodexExecutionError, "模型目录格式无效"):
+            codex_runner.list_codex_models(str(self.codex), use_user_config=True)
 
 
 class FakeCodexProcess:

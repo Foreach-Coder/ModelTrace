@@ -15,6 +15,7 @@ const byId = (id) => document.getElementById(id);
 let codexInitialized = false;
 let codexManualPath = false;
 let codexStatusBusy = false;
+let codexModelsBusy = false;
 let automaticTesting = false;
 
 function escapeHtml(value) {
@@ -198,10 +199,43 @@ function saveCodexPreferences() {
 
 function updateAutomaticControls() {
   document.querySelectorAll("#api-test-form button[type=submit], #codex-test-form input, #codex-test-form select, #codex-test-form button")
-    .forEach((element) => { element.disabled = automaticTesting || (codexStatusBusy && element.closest("#codex-test-form")); });
+    .forEach((element) => {
+      element.disabled = automaticTesting
+        || (codexStatusBusy && element.closest("#codex-test-form"))
+        || (codexModelsBusy && ["codex-use-user-config", "codex-model-toggle", "codex-model-refresh"].includes(element.id));
+    });
 }
 
-async function detectCodex(path, manual) {
+async function loadCodexModels() {
+  if (codexModelsBusy) return false;
+  codexModelsBusy = true;
+  updateAutomaticControls();
+  const status = byId("codex-model-status");
+  status.hidden = false;
+  status.textContent = "正在加载模型列表……";
+  try {
+    const result = await requestJson("/api/codex/models", {
+      codex_path: byId("codex-path").value.trim(),
+      use_user_config: byId("codex-use-user-config").checked,
+    });
+    byId("codex-model-menu").innerHTML = result.models.map((model) => {
+      const label = model.label === model.id ? "" : `<small>${escapeHtml(model.label)}</small>`;
+      return `<button class="codex-model-item" type="button" role="option" data-model-id="${escapeHtml(model.id)}"><span>${escapeHtml(model.id)}</span>${label}</button>`;
+    }).join("");
+    status.textContent = result.models.length
+      ? `已加载 ${result.models.length} 个模型；仍可手动输入其他模型。`
+      : "未发现可选模型；仍可手动输入模型。";
+    return true;
+  } catch (error) {
+    status.textContent = `模型列表加载失败：${error.message}；仍可手动输入模型。`;
+    return false;
+  } finally {
+    codexModelsBusy = false;
+    updateAutomaticControls();
+  }
+}
+
+async function detectCodex(path, manual, refreshModels = false) {
   if (codexStatusBusy) return false;
   codexStatusBusy = true;
   updateAutomaticControls();
@@ -221,6 +255,7 @@ async function detectCodex(path, manual) {
       return false;
     }
     setMessage(byId("codex-runtime-status"), details, "success");
+    if (refreshModels) await loadCodexModels();
     saveCodexPreferences();
     return true;
   } catch (error) {
@@ -245,7 +280,7 @@ function initializeCodex() {
   byId("codex-reasoning-effort").value = preferences.reasoningEffort;
   byId("codex-use-user-config").checked = preferences.useUserConfig;
   codexManualPath = Boolean(preferences.manualPath);
-  return detectCodex(preferences.manualPath, codexManualPath);
+  return detectCodex(preferences.manualPath, codexManualPath, true);
 }
 
 async function testAutomatically(event, options) {
@@ -416,13 +451,25 @@ byId("codex-test-form").addEventListener("submit", (event) => testAutomatically(
 byId("codex-detect").addEventListener("click", () => {
   codexManualPath = false;
   saveCodexPreferences();
-  return detectCodex("", false);
+  return detectCodex("", false, true);
 });
+byId("codex-model-refresh").addEventListener("click", loadCodexModels);
+byId("codex-model-toggle").addEventListener("click", () => {
+  const menu = byId("codex-model-menu");
+  menu.hidden = !menu.hidden;
+});
+byId("codex-model-menu").addEventListener("click", (event) => {
+  const option = event.target.closest("[data-model-id]");
+  if (!option) return;
+  byId("codex-model").value = option.dataset.modelId;
+  byId("codex-model-menu").hidden = true;
+});
+byId("codex-use-user-config").addEventListener("change", loadCodexModels);
 byId("codex-path").addEventListener("input", () => { codexManualPath = Boolean(byId("codex-path").value.trim()); });
 byId("codex-path").addEventListener("blur", (event) => {
   // Let the clicked button run its own discovery/preflight before disabling it.
   if (event.relatedTarget?.closest("#codex-test-form button")) return;
-  if (!automaticTesting && codexManualPath) detectCodex(byId("codex-path").value.trim(), true);
+  if (!automaticTesting && codexManualPath) detectCodex(byId("codex-path").value.trim(), true, true);
 });
 byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });

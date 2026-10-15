@@ -74,6 +74,43 @@ class CodexRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), unauthenticated)
 
+    def test_models_returns_catalog_for_requested_config_mode(self):
+        catalog = [
+            {"id": "k3", "label": "K3"},
+            {"id": "deepseek-flash", "label": "DeepSeek Flash"},
+        ]
+        for use_user_config in (False, True):
+            with self.subTest(use_user_config=use_user_config):
+                with patch("codex_routes.list_codex_models", return_value=catalog) as models:
+                    response = self.client.post("/api/codex/models", json={
+                        "codex_path": "  C:/Codex/codex.exe  ",
+                        "use_user_config": use_user_config,
+                    })
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json(), {"models": catalog})
+                models.assert_called_once_with(
+                    "C:/Codex/codex.exe", use_user_config=use_user_config,
+                )
+
+    def test_models_rejects_non_boolean_config_mode_before_runtime(self):
+        for value in (None, "true", 0, 1, [], {}):
+            with self.subTest(value=value):
+                with patch("codex_routes.list_codex_models") as models:
+                    response = self.client.post("/api/codex/models", json={
+                        "use_user_config": value,
+                    })
+                self.assertEqual(response.status_code, 400)
+                models.assert_not_called()
+
+    def test_models_preserves_runtime_error_status(self):
+        with patch(
+            "codex_routes.list_codex_models",
+            side_effect=CodexExecutionError("模型目录请求失败"),
+        ):
+            response = self.client.post("/api/codex/models", json={})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.get_json(), {"error": "模型目录请求失败"})
+
     def test_probe_returns_shared_acceptance_contract(self):
         with patch("codex_routes.request_codex_completion", return_value=ANSWER) as completion:
             response = self.client.post("/api/test/codex/probe", json=self.payload)
