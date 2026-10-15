@@ -81,7 +81,7 @@ templates/          页面模板
 
 ## 指纹库说明
 
-项目中现有指纹库共包含两个模型家族、18 个模型：
+项目中现有指纹库共包含四个模型家族、20 个模型：
 
 ```
 gpt-5.4
@@ -102,9 +102,12 @@ claude-opus-4-7
 claude-opus-4-8
 claude-opus-5
 claude-opus-5-5
+deepseek-flash
+k3
 ```
 
 GPT 采集自官方订阅 Codex，Claude 采集自 [OAIPro](https://api.oaipro.com/)。
+DeepSeek 和 Kimi 为通过 API 采集的自定义指纹，登记名称分别为 `deepseek-flash` 和 `k3`，各包含 36 份参考回答，并已纳入统一指纹库。
 
 ## 声明
 
