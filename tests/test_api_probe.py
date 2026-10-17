@@ -185,6 +185,25 @@ class StructuredCompletionTests(unittest.TestCase):
         self.assertEqual(json.loads(urlopen.call_args.args[0].data)["temperature"], 0)
         self.assertEqual(urlopen.call_args.args[0].full_url, "https://example.test/v1/chat/completions")
 
+    @patch("enrollment.urllib.request.urlopen")
+    def test_reasoning_effort_is_sent_only_for_openai_when_explicit(self, urlopen):
+        cases = (
+            ("openai", "high", "high"),
+            ("openai", None, None),
+            ("anthropic", "high", None),
+        )
+        for api_format, reasoning_effort, expected in cases:
+            with self.subTest(api_format=api_format, reasoning_effort=reasoning_effort):
+                urlopen.return_value = json_response(
+                    openai_response() if api_format == "openai" else anthropic_response()
+                )
+                self.complete(api_format, reasoning_effort=reasoning_effort)
+                body = json.loads(urlopen.call_args.args[0].data)
+                if expected is None:
+                    self.assertNotIn("reasoning_effort", body)
+                else:
+                    self.assertEqual(body["reasoning_effort"], expected)
+
     @patch("enrollment.time.sleep")
     @patch("enrollment.urllib.request.urlopen")
     def test_retryable_http_failure_makes_one_attempt_and_no_protocol_fallback(self, urlopen, sleep):

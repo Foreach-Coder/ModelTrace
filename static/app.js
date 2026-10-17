@@ -246,6 +246,9 @@ function updateAutomaticControls() {
         || (codexUis.candy.statusBusy && element.closest("#candy-codex-form"))
         || (codexUis.candy.modelsBusy && [codexUis.candy.useUserConfig, codexUis.candy.modelToggle, codexUis.candy.modelRefresh].includes(element.id));
     });
+  if (byId("candy-api-format").value !== "openai") {
+    byId("candy-api-reasoning-effort").disabled = true;
+  }
   byId("candy-stop").disabled = !candyTesting || candyStopRequested;
 }
 
@@ -455,6 +458,7 @@ function candyConfiguration(kind) {
     const apiKey = byId("candy-api-key").value.trim();
     const apiModel = byId("candy-api-model").value.trim();
     const apiFormat = byId("candy-api-format").value;
+    const reasoningEffort = byId("candy-api-reasoning-effort").value;
     if (!baseUrl || !apiKey || !apiModel || !["openai", "anthropic"].includes(apiFormat)) {
       throw new Error("请完整填写 API 配置");
     }
@@ -468,14 +472,19 @@ function candyConfiguration(kind) {
       || parsedBaseUrl.username || parsedBaseUrl.password) {
       throw new Error("Base URL 必须是有效的 HTTP 或 HTTPS 地址");
     }
+    if (reasoningEffort && !["none", "minimal", "low", "medium", "high", "xhigh"].includes(reasoningEffort)) {
+      throw new Error("思考强度不是支持的 OpenAI 标准值");
+    }
+    const payload = {
+      base_url: baseUrl, api_key: apiKey, api_model: apiModel, api_format: apiFormat,
+      temperature: optionalNumber("candy-api-temperature"),
+    };
+    if (apiFormat === "openai" && reasoningEffort) payload.reasoning_effort = reasoningEffort;
     return {
       rounds, timeoutSeconds,
       summary: `API · ${apiModel} · ${apiFormat}`,
       endpoint: "/api/candy/api/probe",
-      payload: {
-        base_url: baseUrl, api_key: apiKey, api_model: apiModel, api_format: apiFormat,
-        temperature: optionalNumber("candy-api-temperature"),
-      },
+      payload,
     };
   }
   const model = byId("candy-codex-model").value.trim();
@@ -728,6 +737,12 @@ byId("codex-path").addEventListener("blur", (event) => {
   if (!automaticTesting && !candyTesting && codexUis.test.manualPath) detectCodex(byId("codex-path").value.trim(), true, true, "test");
 });
 byId("candy-api-form").addEventListener("submit", (event) => startCandyBatch(event, "api"));
+byId("candy-api-format").addEventListener("change", () => {
+  const effort = byId("candy-api-reasoning-effort");
+  const openai = byId("candy-api-format").value === "openai";
+  if (!openai) effort.value = "";
+  effort.disabled = !openai;
+});
 byId("candy-codex-form").addEventListener("submit", (event) => startCandyBatch(event, "codex"));
 byId("candy-stop").addEventListener("click", () => {
   if (!candyTesting) return;

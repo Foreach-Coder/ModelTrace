@@ -113,6 +113,13 @@ def candy_api_probe():
             temperature = None
         elif type(temperature) not in (int, float) or not math.isfinite(temperature):
             raise ValueError("temperature 必须是有限数值或留空")
+        reasoning_effort = payload.get("reasoning_effort")
+        if reasoning_effort == "":
+            reasoning_effort = None
+        elif reasoning_effort not in (None, "none", "minimal", "low", "medium", "high", "xhigh"):
+            raise ValueError("reasoning_effort 仅支持 none、minimal、low、medium、high、xhigh 或留空")
+        if api_format != "openai":
+            reasoning_effort = None
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
 
@@ -122,7 +129,7 @@ def candy_api_probe():
     return _timed_probe(lambda: request_completion_result(
         base_url=base_url, api_key=api_key, api_model=api_model,
         prompt=question["prompt"], temperature=temperature, api_format=api_format,
-        timeout=timeout, max_attempts=1,
+        timeout=timeout, max_attempts=1, reasoning_effort=reasoning_effort,
     ), api_key=api_key)
 
 

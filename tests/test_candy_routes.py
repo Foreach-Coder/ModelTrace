@@ -92,6 +92,7 @@ class CandyRouteTests(unittest.TestCase):
                     base_url="https://example.test/v1", api_key="fixture-private-key",
                     api_model="fixture-model", prompt=PROMPT, temperature=0,
                     api_format=api_format, timeout=600, max_attempts=1,
+                    reasoning_effort=None,
                 )
 
     def test_codex_forwards_fixed_prompt_effort_and_user_configuration(self):
@@ -134,6 +135,28 @@ class CandyRouteTests(unittest.TestCase):
                 response, completion = self.probe("api", {**self.api_payload, "temperature": temperature})
                 self.assertEqual(response.status_code, 200)
                 self.assertIsNone(completion.call_args.kwargs["temperature"])
+
+    def test_api_reasoning_effort_is_optional_and_openai_only(self):
+        for api_format, supplied, expected in (
+            ("openai", "high", "high"),
+            ("openai", None, None),
+            ("openai", "", None),
+            ("anthropic", "high", None),
+        ):
+            with self.subTest(api_format=api_format, supplied=supplied):
+                payload = {**self.api_payload, "api_format": api_format}
+                if supplied is not None:
+                    payload["reasoning_effort"] = supplied
+                response, completion = self.probe("api", payload)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(completion.call_args.kwargs["reasoning_effort"], expected)
+
+    def test_api_rejects_nonstandard_reasoning_effort_before_transport(self):
+        for value in ("max", "ultra", "HIGH", 1, True, [], {}):
+            with self.subTest(value=value):
+                self.assert_rejected_before_transport(
+                    "api", {**self.api_payload, "reasoning_effort": value},
+                )
 
     def assert_rejected_before_transport(self, mode, payload, status=400):
         with patch("candy_routes.request_completion_result", return_value={"text": CORRECT, "usage": USAGE}) as api:

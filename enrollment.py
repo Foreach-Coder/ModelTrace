@@ -214,6 +214,7 @@ def _request_completion_payload(
     system_prompt: str = "",
     timeout: float = 240,
     max_attempts: int = MAX_ATTEMPTS,
+    reasoning_effort: str | None = None,
 ) -> dict:
     if api_format == "anthropic":
         body_data = {
@@ -247,6 +248,8 @@ def _request_completion_payload(
         }
     if temperature is not None:
         body_data["temperature"] = temperature
+    if api_format == "openai" and reasoning_effort is not None:
+        body_data["reasoning_effort"] = reasoning_effort
     body = json.dumps(body_data).encode("utf-8")
     url = completion_url(base_url, api_format)
     payload = None
@@ -392,14 +395,17 @@ def request_completion_result(
     api_format: str,
     timeout: float = 600,
     max_attempts: int = 1,
+    reasoning_effort: str | None = None,
 ) -> dict[str, object]:
     if api_format not in ("openai", "anthropic"):
         raise ValueError("api_format 必须是 openai 或 anthropic")
     if type(max_attempts) is not int or max_attempts < 1:
         raise ValueError("max_attempts 必须是正整数")
+    if reasoning_effort not in (None, "none", "minimal", "low", "medium", "high", "xhigh"):
+        raise ValueError("reasoning_effort 不是支持的 OpenAI 推理强度")
     payload = _request_completion_payload(
         base_url, api_key, api_model, prompt, temperature, api_format,
-        timeout=timeout, max_attempts=max_attempts,
+        timeout=timeout, max_attempts=max_attempts, reasoning_effort=reasoning_effort,
     )
     usage = _completion_usage(payload, api_format) if isinstance(payload, dict) else {
         "input_tokens": None, "output_tokens": None, "reasoning_tokens": None,

@@ -24,6 +24,9 @@ class TestPageTests(unittest.TestCase):
         self.assertIn('id="candy-codex-timeout" type="number" min="30" max="1800" value="600"', html)
         self.assertIn('id="candy-api-rounds" type="number" min="1" max="50" value="5"', html)
         self.assertIn('id="candy-codex-rounds" type="number" min="1" max="50" value="5"', html)
+        self.assertIn('id="candy-api-reasoning-effort"', html)
+        for value in ("none", "minimal", "low", "medium", "high", "xhigh"):
+            self.assertIn(f'<option value="{value}">{value}</option>', html)
         self.assertIn('id="candy-stop"', html)
         self.assertIn('id="candy-summary"', html)
         self.assertIn('id="candy-result-rows"', html)
@@ -219,7 +222,7 @@ function element(id) {
 const modelControls = ['codex-path', 'codex-model', 'codex-reasoning-effort', 'codex-use-user-config',
   'codex-detect', 'codex-model-toggle', 'codex-model-refresh', 'codex-submit', 'api-submit'].map(element);
 const candyControls = ['candy-api-base', 'candy-api-key', 'candy-api-model', 'candy-api-format',
-  'candy-api-temperature', 'candy-api-rounds', 'candy-api-timeout', 'candy-api-start',
+  'candy-api-temperature', 'candy-api-reasoning-effort', 'candy-api-rounds', 'candy-api-timeout', 'candy-api-start',
   'candy-codex-path', 'candy-codex-model', 'candy-codex-reasoning-effort',
   'candy-codex-use-user-config', 'candy-codex-detect', 'candy-codex-model-toggle',
   'candy-codex-model-refresh', 'candy-codex-rounds', 'candy-codex-timeout',
@@ -527,6 +530,34 @@ for (const secret of ['private-key', '<img src=x', '没有标签', '<final-answe
   assert.doesNotMatch(persisted, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
     'API keys, answers, and results must not be persisted');
 }
+""")
+
+    def test_candy_api_reasoning_effort_is_sent_only_for_openai(self):
+        self.run_candy_ui_scenario(r"""
+element('candy-api-base').value = 'https://example.test/v1';
+element('candy-api-key').value = 'private-key';
+element('candy-api-model').value = 'model-a';
+element('candy-api-rounds').value = '1';
+element('candy-api-timeout').value = '600';
+const format = element('candy-api-format');
+const effort = element('candy-api-reasoning-effort');
+format.value = 'openai';
+effort.value = 'high';
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.equal(probePayloads[0].reasoning_effort, 'high');
+
+format.value = 'anthropic';
+format.handlers.change();
+assert.equal(effort.disabled, true);
+assert.equal(effort.value, '');
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.equal('reasoning_effort' in probePayloads[1], false);
+
+format.value = 'openai';
+format.handlers.change();
+assert.equal(effort.disabled, false);
+await element('candy-api-form').handlers.submit({preventDefault() {}});
+assert.equal('reasoning_effort' in probePayloads[2], false);
 """)
 
     def test_invalid_candy_api_preflight_preserves_previous_batch(self):

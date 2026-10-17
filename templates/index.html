@@ -106,6 +106,7 @@
               <label><span>测试轮数</span><input id="candy-api-rounds" type="number" min="1" max="50" value="5" required></label>
               <label><span>请求超时（秒）</span><input id="candy-api-timeout" type="number" min="30" max="1800" value="600" required></label>
               <label><span>温度（可选）</span><input id="candy-api-temperature" type="number" min="0" max="2" step="0.1" placeholder="接口默认"></label>
+              <label><span>思考强度（可选）</span><select id="candy-api-reasoning-effort"><option value="" selected>接口默认</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
             </div>
             <div class="form-footer"><button id="candy-api-start" class="button primary" type="submit">开始测试</button></div>
           </form>
